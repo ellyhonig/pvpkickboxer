@@ -65,6 +65,10 @@ const resetBtn = document.getElementById('resetBtn');
 const canvas = document.getElementById('c');
 const DEBUG_VIS = true;
 const CALIB_STORAGE_KEY = 'pvpkickboxer_calib_v2';
+const GAZE_CALIB_DWELL_MS = 1000;
+const GAZE_CALIB_COOLDOWN_MS = 800;
+const GAZE_CALIB_ANGLE_DEG = 8;
+const GAZE_CALIB_FIXED_POS = new THREE.Vector3(0.9, 1.25, 0.0);
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -96,6 +100,39 @@ const floor = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.MeshStan
 floor.rotation.x = -Math.PI / 2;
 world.add(floor);
 
+const gazeCalib = {
+  activeSince: 0,
+  lastTriggerAt: 0,
+  progress: 0,
+  marker: null,
+  fillMesh: null,
+  coreMesh: null
+};
+
+function buildGazeCalibratorMarker() {
+  const g = new THREE.Group();
+  const core = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05, 20, 16),
+    new THREE.MeshStandardMaterial({ color: 0x2ee6a8, emissive: 0x0a3324, emissiveIntensity: 0.7 })
+  );
+  const ringBase = new THREE.Mesh(
+    new THREE.RingGeometry(0.075, 0.095, 36),
+    new THREE.MeshBasicMaterial({ color: 0x244a3d, transparent: true, opacity: 0.8, side: THREE.DoubleSide })
+  );
+  const fill = new THREE.Mesh(
+    new THREE.RingGeometry(0.075, 0.095, 36, 1, Math.PI / 2, 0.001),
+    new THREE.MeshBasicMaterial({ color: 0x6fffd3, transparent: true, opacity: 0.95, side: THREE.DoubleSide })
+  );
+  g.add(core);
+  g.add(ringBase);
+  g.add(fill);
+  g.visible = false;
+  world.add(g);
+  gazeCalib.marker = g;
+  gazeCalib.fillMesh = fill;
+  gazeCalib.coreMesh = core;
+}
+
 const debugHud = document.createElement('pre');
 debugHud.style.position = 'fixed';
 debugHud.style.left = '10px';
@@ -125,6 +162,7 @@ if (DEBUG_VIS) {
   world.add(debugArrows.rightHipDir);
   world.add(debugArrows.rightKneeDir);
 }
+buildGazeCalibratorMarker();
 
 function vsub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
 function vadd(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
@@ -158,6 +196,23 @@ function updateArrow(helper, origin, target) {
   helper.position.copy(origin);
   helper.setDirection(dir.normalize());
   helper.setLength(len);
+}
+
+function hmdLocalForward() {
+  const xrCam = renderer.xr.getCamera(camera);
+  const dirW = new THREE.Vector3();
+  xrCam.getWorldDirection(dirW);
+  const worldQuat = new THREE.Quaternion();
+  world.getWorldQuaternion(worldQuat).invert();
+  return dirW.applyQuaternion(worldQuat).normalize();
+}
+
+function setGazeProgress(progress01) {
+  const p = clamp(progress01, 0, 1);
+  gazeCalib.progress = p;
+  if (!gazeCalib.fillMesh) return;
+  gazeCalib.fillMesh.geometry.dispose();
+  gazeCalib.fillMesh.geometry = new THREE.RingGeometry(0.075, 0.095, 36, 1, Math.PI / 2, (Math.PI * 2) * p);
 }
 
 class StickCharacter {
@@ -295,7 +350,11 @@ const calibr = {
   leftKneeRotRef: new THREE.Quaternion(),
   rightKneeRotRef: new THREE.Quaternion(),
   leftAnkleDirRef: new THREE.Quaternion(),
-  rightAnkleDirRef: new THREE.Quaternion()
+  rightAnkleDirRef: new THREE.Quaternion(),
+  leftToeLocal: new THREE.Vector3(),
+  leftHeelLocal: new THREE.Vector3(),
+  rightToeLocal: new THREE.Vector3(),
+  rightHeelLocal: new THREE.Vector3()
 };
 
 function saveCalibration() {
@@ -307,7 +366,11 @@ function saveCalibration() {
     leftKneeRotRef: calibr.leftKneeRotRef.toArray(),
     rightKneeRotRef: calibr.rightKneeRotRef.toArray(),
     leftAnkleDirRef: calibr.leftAnkleDirRef.toArray(),
-    rightAnkleDirRef: calibr.rightAnkleDirRef.toArray()
+    rightAnkleDirRef: calibr.rightAnkleDirRef.toArray(),
+    leftToeLocal: calibr.leftToeLocal.toArray(),
+    leftHeelLocal: calibr.leftHeelLocal.toArray(),
+    rightToeLocal: calibr.rightToeLocal.toArray(),
+    rightHeelLocal: calibr.rightHeelLocal.toArray()
   }));
 }
 
@@ -324,6 +387,10 @@ function loadCalibration() {
     calibr.rightKneeRotRef.fromArray(d.rightKneeRotRef || [0, 0, 0, 1]);
     calibr.leftAnkleDirRef.fromArray(d.leftAnkleDirRef || [0, 0, 0, 1]);
     calibr.rightAnkleDirRef.fromArray(d.rightAnkleDirRef || [0, 0, 0, 1]);
+    calibr.leftToeLocal.fromArray(d.leftToeLocal || [0, 0, 0]);
+    calibr.leftHeelLocal.fromArray(d.leftHeelLocal || [0, 0, 0]);
+    calibr.rightToeLocal.fromArray(d.rightToeLocal || [0, 0, 0]);
+    calibr.rightHeelLocal.fromArray(d.rightHeelLocal || [0, 0, 0]);
   } catch (_) {
     calibr.valid = false;
   }
@@ -649,6 +716,15 @@ function captureAnkleDirectionReference() {
   else calibr.rightAnkleDirRef.identity();
 }
 
+function captureRigidFootReference() {
+  const la = getJointVec('LeftAnkle');
+  const ra = getJointVec('RightAnkle');
+  calibr.leftToeLocal.copy(getJointVec('LeftToe').sub(la).applyQuaternion(calibr.leftAnkleDirRef.clone().invert()));
+  calibr.leftHeelLocal.copy(getJointVec('LeftHeel').sub(la).applyQuaternion(calibr.leftAnkleDirRef.clone().invert()));
+  calibr.rightToeLocal.copy(getJointVec('RightToe').sub(ra).applyQuaternion(calibr.rightAnkleDirRef.clone().invert()));
+  calibr.rightHeelLocal.copy(getJointVec('RightHeel').sub(ra).applyQuaternion(calibr.rightAnkleDirRef.clone().invert()));
+}
+
 function calibrateNow() {
   if (!renderer.xr.isPresenting) {
     statusEl.textContent = 'Calibration requires active VR session';
@@ -684,8 +760,75 @@ function calibrateNow() {
   xrState.lockedRightKneeNode = rightCtrl || null;
   calibr.valid = true;
   captureAnkleDirectionReference();
+  captureRigidFootReference();
   saveCalibration();
   statusEl.textContent = 'Calibrated: waist offset + knee controllers locked.';
+}
+
+function clearCalibrationOnly() {
+  const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
+  calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
+  calibr.valid = false;
+  calibr.leftKneeOffset.set(0, 0, 0);
+  calibr.rightKneeOffset.set(0, 0, 0);
+  calibr.leftKneeRotRef.identity();
+  calibr.rightKneeRotRef.identity();
+  calibr.leftAnkleDirRef.identity();
+  calibr.rightAnkleDirRef.identity();
+  calibr.leftToeLocal.set(0, 0, 0);
+  calibr.leftHeelLocal.set(0, 0, 0);
+  calibr.rightToeLocal.set(0, 0, 0);
+  calibr.rightHeelLocal.set(0, 0, 0);
+  legPlant.Left.locked = false;
+  legPlant.Right.locked = false;
+  xrState.lockedLeftKneeSource = null;
+  xrState.lockedRightKneeSource = null;
+  xrState.lockedLeftKneeNode = null;
+  xrState.lockedRightKneeNode = null;
+  saveCalibration();
+  statusEl.textContent = 'Calibration cleared.';
+}
+
+function updateGazeCalibrator() {
+  if (!renderer.xr.isPresenting || !gazeCalib.marker) {
+    if (gazeCalib.marker) gazeCalib.marker.visible = false;
+    gazeCalib.activeSince = 0;
+    setGazeProgress(0);
+    return;
+  }
+
+  const head = hmdLocalPos();
+  const forward = hmdLocalForward();
+  const targetPos = GAZE_CALIB_FIXED_POS;
+  gazeCalib.marker.visible = true;
+  gazeCalib.marker.position.copy(targetPos);
+  gazeCalib.marker.lookAt(new THREE.Vector3(targetPos.x, targetPos.y, targetPos.z + 1));
+  gazeCalib.coreMesh.material.color.setHex(calibr.valid ? 0xff7a7a : 0x2ee6a8);
+
+  const hmdToMarker = targetPos.clone().sub(head);
+  const dot = hmdToMarker.normalize().dot(forward);
+  const lookThreshold = Math.cos(THREE.MathUtils.degToRad(GAZE_CALIB_ANGLE_DEG));
+  const looking = dot >= lookThreshold;
+  const now = performance.now();
+
+  if (!looking) {
+    gazeCalib.activeSince = 0;
+    setGazeProgress(0);
+    return;
+  }
+
+  if (!gazeCalib.activeSince) gazeCalib.activeSince = now;
+  const elapsed = now - gazeCalib.activeSince;
+  setGazeProgress(elapsed / GAZE_CALIB_DWELL_MS);
+
+  if (elapsed < GAZE_CALIB_DWELL_MS) return;
+  if (now - gazeCalib.lastTriggerAt < GAZE_CALIB_COOLDOWN_MS) return;
+
+  gazeCalib.lastTriggerAt = now;
+  gazeCalib.activeSince = 0;
+  setGazeProgress(0);
+  if (calibr.valid) clearCalibrationOnly();
+  else calibrateNow();
 }
 
 calibrateBtn.addEventListener('click', calibrateNow);
@@ -750,46 +893,61 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
     return;
   }
 
-  setPinned('Head', head, 0.75);
-  setPinned('Neck', neckTarget, 0.7);
-  setPinned('Core', coreTarget, 0.55);
+  setPinned('Core', coreTarget, 1);
 
   const activeLeftKneeCtrl = calibr.valid ? (xrState.lockedLeftKneeNode || dev.leftKneeCtrl) : dev.leftKneeCtrl;
   const activeRightKneeCtrl = calibr.valid ? (xrState.lockedRightKneeNode || dev.rightKneeCtrl) : dev.rightKneeCtrl;
   const leftKneeCtrlPos = getControllerLocalPos(activeLeftKneeCtrl);
   const rightKneeCtrlPos = getControllerLocalPos(activeRightKneeCtrl);
+  const leftCtrlAdjusted = leftKneeCtrlPos ? leftKneeCtrlPos.clone().add(calibr.leftKneeOffset) : null;
+  const rightCtrlAdjusted = rightKneeCtrlPos ? rightKneeCtrlPos.clone().add(calibr.rightKneeOffset) : null;
+  const leftGrounded = updateLegPlantLock('Left', leftCtrlAdjusted);
+  const rightGrounded = updateLegPlantLock('Right', rightCtrlAdjusted);
+
   if (leftKneeCtrlPos) {
     const coreToHipLen = avatarLocal.edgeLenByJoints('Core', 'LeftHip');
-    const thighLen = avatarLocal.edgeLenByJoints('LeftHip', 'LeftKnee');
-    const leftCtrlAdjusted = leftKneeCtrlPos.clone().add(calibr.leftKneeOffset);
     const leftDir = leftCtrlAdjusted.clone().sub(coreTarget);
     if (leftDir.lengthSq() < 1e-8) leftDir.set(-1, -0.2, 0);
     leftDir.normalize();
     leftHipTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen);
-    leftKneeTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen + thighLen);
-    setPinned('LeftHip', leftHipTarget, 0.48);
-    setPinned('LeftKnee', leftKneeTarget, 0.45);
+    if (leftGrounded && legPlant.Left.locked) {
+      leftKneeTarget = solveKneeFromHipAnkle('Left', leftHipTarget, legPlant.Left.ankle, leftCtrlAdjusted);
+      setPinned('LeftAnkle', legPlant.Left.ankle, 1);
+      setPinned('LeftToe', legPlant.Left.toe, 1);
+      setPinned('LeftHeel', legPlant.Left.heel, 1);
+    } else {
+      const thighLen = avatarLocal.edgeLenByJoints('LeftHip', 'LeftKnee');
+      leftKneeTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen + thighLen);
+    }
+    setPinned('LeftHip', leftHipTarget, 1);
+    setPinned('LeftKnee', leftKneeTarget, 1);
   }
   if (rightKneeCtrlPos) {
     const coreToHipLen = avatarLocal.edgeLenByJoints('Core', 'RightHip');
-    const thighLen = avatarLocal.edgeLenByJoints('RightHip', 'RightKnee');
-    const rightCtrlAdjusted = rightKneeCtrlPos.clone().add(calibr.rightKneeOffset);
     const rightDir = rightCtrlAdjusted.clone().sub(coreTarget);
     if (rightDir.lengthSq() < 1e-8) rightDir.set(1, -0.2, 0);
     rightDir.normalize();
     rightHipTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen);
-    rightKneeTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen + thighLen);
-    setPinned('RightHip', rightHipTarget, 0.48);
-    setPinned('RightKnee', rightKneeTarget, 0.45);
+    if (rightGrounded && legPlant.Right.locked) {
+      rightKneeTarget = solveKneeFromHipAnkle('Right', rightHipTarget, legPlant.Right.ankle, rightCtrlAdjusted);
+      setPinned('RightAnkle', legPlant.Right.ankle, 1);
+      setPinned('RightToe', legPlant.Right.toe, 1);
+      setPinned('RightHeel', legPlant.Right.heel, 1);
+    } else {
+      const thighLen = avatarLocal.edgeLenByJoints('RightHip', 'RightKnee');
+      rightKneeTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen + thighLen);
+    }
+    setPinned('RightHip', rightHipTarget, 1);
+    setPinned('RightKnee', rightKneeTarget, 1);
   }
 
   const qL = getControllerLocalQuat(activeLeftKneeCtrl);
   const qR = getControllerLocalQuat(activeRightKneeCtrl);
-  if (qL) {
+  if (qL && !leftGrounded) {
     const delta = qL.clone().multiply(calibr.leftKneeRotRef.clone().invert()).normalize();
     avatarLocal.rot.LeftKnee.copy(delta.multiply(calibr.leftAnkleDirRef));
   }
-  if (qR) {
+  if (qR && !rightGrounded) {
     const delta = qR.clone().multiply(calibr.rightKneeRotRef.clone().invert()).normalize();
     avatarLocal.rot.RightKnee.copy(delta.multiply(calibr.rightAnkleDirRef));
   }
@@ -805,6 +963,7 @@ lockedR=${sourceLabel(xrState.lockedRightKneeSource)}
 liveL=${sourceLabel(activeLeftKneeCtrl)}
 liveR=${sourceLabel(activeRightKneeCtrl)}
 qL=${lRot} qR=${rRot}
+groundL=${leftGrounded ? '1' : '0'} groundR=${rightGrounded ? '1' : '0'}
 waist=(${coreTarget.x.toFixed(2)}, ${coreTarget.y.toFixed(2)}, ${coreTarget.z.toFixed(2)})
 neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.toFixed(2)})`;
     updateArrow(debugArrows.waistToHmd, coreTarget, head);
@@ -820,8 +979,64 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
   }
 }
 
+function isLegGroundContact(side) {
+  const ankle = avatarLocal.joints[`${side}Ankle`];
+  const toe = avatarLocal.joints[`${side}Toe`];
+  const heel = avatarLocal.joints[`${side}Heel`];
+  if (!ankle || !toe || !heel) return false;
+  return Math.min(ankle[1], toe[1], heel[1]) <= LEG_PLANT_EPS;
+}
+
+function updateLegPlantLock(side, controllerTargetPos = null) {
+  const state = legPlant[side];
+  const grounded = isLegGroundContact(side);
+  if (state.locked && controllerTargetPos && controllerTargetPos.y > LEG_RELEASE_Y) {
+    state.locked = false;
+    return false;
+  }
+  if (grounded && !state.locked) {
+    state.ankle.fromArray(avatarLocal.joints[`${side}Ankle`]);
+    state.toe.fromArray(avatarLocal.joints[`${side}Toe`]);
+    state.heel.fromArray(avatarLocal.joints[`${side}Heel`]);
+    state.locked = true;
+  } else if (!grounded && state.locked) {
+    state.locked = false;
+  }
+  return grounded;
+}
+
+function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos) {
+  const thigh = avatarLocal.edgeLenByJoints(`${side}Hip`, `${side}Knee`);
+  const shin = avatarLocal.edgeLenByJoints(`${side}Knee`, `${side}Ankle`);
+  const h = hipTarget.clone();
+  const a = ankleTarget.clone();
+  const v = a.clone().sub(h);
+  const dRaw = v.length();
+  const d = clamp(dRaw, 1e-4, thigh + shin - 1e-4);
+  const dir = dRaw > 1e-6 ? v.multiplyScalar(1 / dRaw) : new THREE.Vector3(0, -1, 0);
+
+  const mid = h.clone().addScaledVector(dir, (d * d + thigh * thigh - shin * shin) / (2 * d));
+  const hOff = Math.sqrt(Math.max(0, thigh * thigh - h.distanceToSquared(mid)));
+
+  let pole = controllerPos.clone().sub(mid);
+  pole.addScaledVector(dir, -pole.dot(dir));
+  if (pole.lengthSq() < 1e-8) {
+    pole.set(side === 'Left' ? -1 : 1, 0, 0);
+  }
+  pole.normalize();
+
+  const knee = mid.clone().addScaledVector(pole, hOff);
+  if (side === 'Left') knee.x = Math.min(knee.x, h.x - 0.005);
+  else knee.x = Math.max(knee.x, h.x + 0.005);
+  return knee;
+}
+
 function snapLocalAvatarFeetToGround() {
   const footJoints = ['LeftToe', 'RightToe', 'LeftHeel', 'RightHeel', 'LeftAnkle', 'RightAnkle'];
+  const lowerBodyJoints = [
+    'LeftHip', 'LeftKnee', 'LeftAnkle', 'LeftToe', 'LeftHeel',
+    'RightHip', 'RightKnee', 'RightAnkle', 'RightToe', 'RightHeel'
+  ];
   let minY = Infinity;
   for (const j of footJoints) {
     const p = avatarLocal.joints[j];
@@ -829,37 +1044,88 @@ function snapLocalAvatarFeetToGround() {
     if (p[1] < minY) minY = p[1];
   }
   if (!Number.isFinite(minY)) return;
+  // Disabled: if feet are above floor (minY > 0), do not pull body down.
+  // if (minY > 0) { ... } behavior intentionally commented out.
+  if (minY > 0) return;
   if (Math.abs(minY) < 1e-5) return;
-  for (const j of JOINTS) {
+  for (const j of lowerBodyJoints) {
     avatarLocal.joints[j][1] -= minY;
   }
 }
 
+function enforceRigidFeetFromAnkles() {
+  if (!calibr.valid) return;
+  if (!legPlant.Left.locked) {
+    const leftAnkle = getJointVec('LeftAnkle');
+    const leftToe = leftAnkle.clone().add(calibr.leftToeLocal.clone().applyQuaternion(avatarLocal.rot.LeftKnee));
+    const leftHeel = leftAnkle.clone().add(calibr.leftHeelLocal.clone().applyQuaternion(avatarLocal.rot.LeftKnee));
+    avatarLocal.joints.LeftToe = [leftToe.x, leftToe.y, leftToe.z];
+    avatarLocal.joints.LeftHeel = [leftHeel.x, leftHeel.y, leftHeel.z];
+  }
+  if (!legPlant.Right.locked) {
+    const rightAnkle = getJointVec('RightAnkle');
+    const rightToe = rightAnkle.clone().add(calibr.rightToeLocal.clone().applyQuaternion(avatarLocal.rot.RightKnee));
+    const rightHeel = rightAnkle.clone().add(calibr.rightHeelLocal.clone().applyQuaternion(avatarLocal.rot.RightKnee));
+    avatarLocal.joints.RightToe = [rightToe.x, rightToe.y, rightToe.z];
+    avatarLocal.joints.RightHeel = [rightHeel.x, rightHeel.y, rightHeel.z];
+  }
+}
+
+function captureJointTargets(ch) {
+  const out = {};
+  for (const j of JOINTS) {
+    const p = ch.joints[j];
+    out[j] = [p[0], p[1], p[2]];
+  }
+  return out;
+}
+
+function blendFromPrevToTarget(ch, targets, t) {
+  for (const j of JOINTS) {
+    const p0 = ch.prevJoints[j];
+    const pt = targets[j];
+    const p = ch.joints[j];
+    p[0] = p0[0] + (pt[0] - p0[0]) * t;
+    p[1] = p0[1] + (pt[1] - p0[1]) * t;
+    p[2] = p0[2] + (pt[2] - p0[2]) * t;
+  }
+}
+
+function capJointSpeed(ch, dt, maxSpeed) {
+  if (dt <= 1e-5) return;
+  const maxStep = maxSpeed * dt;
+  const maxStepSq = maxStep * maxStep;
+  for (const j of JOINTS) {
+    const prev = ch.prevJoints[j];
+    const curr = ch.joints[j];
+    const dx = curr[0] - prev[0];
+    const dy = curr[1] - prev[1];
+    const dz = curr[2] - prev[2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 <= maxStepSq) continue;
+    const inv = maxStep / (Math.sqrt(d2) + 1e-9);
+    curr[0] = prev[0] + dx * inv;
+    curr[1] = prev[1] + dy * inv;
+    curr[2] = prev[2] + dz * inv;
+  }
+}
+
+function estimateMaxTravel(ch) {
+  let maxD = 0;
+  for (const j of JOINTS) {
+    const prev = ch.prevJoints[j];
+    const curr = ch.joints[j];
+    const dx = curr[0] - prev[0];
+    const dy = curr[1] - prev[1];
+    const dz = curr[2] - prev[2];
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d > maxD) maxD = d;
+  }
+  return maxD;
+}
+
 function maybeAutoCalibrateFromLookUp() {
-  if (!renderer.xr.isPresenting) {
-    lookUpCalib.lookingSince = 0;
-    return;
-  }
-  if (calibr.valid) {
-    lookUpCalib.lookingSince = 0;
-    return;
-  }
-  const xrCam = renderer.xr.getCamera(camera);
-  const dir = new THREE.Vector3();
-  xrCam.getWorldDirection(dir);
-  const now = performance.now();
-  if (dir.y >= lookUpCalib.thresholdY) {
-    if (!lookUpCalib.lookingSince) lookUpCalib.lookingSince = now;
-    const heldLongEnough = (now - lookUpCalib.lookingSince) >= lookUpCalib.holdMs;
-    const cooledDown = (now - lookUpCalib.lastTriggerAt) >= lookUpCalib.cooldownMs;
-    if (heldLongEnough && cooledDown) {
-      calibrateNow();
-      lookUpCalib.lastTriggerAt = now;
-      lookUpCalib.lookingSince = 0;
-    }
-  } else {
-    lookUpCalib.lookingSince = 0;
-  }
+  // Disabled in favor of explicit gaze calibrator marker.
 }
 
 function applyRotationChildTargets(ch, stiff) {
@@ -915,19 +1181,35 @@ function segSegClosest(p1, q1, p2, q2) {
   return { s, t, c1, c2, diff, dist: vlen(diff) };
 }
 
-const SOLVE_ITERS = 14;
-const DIST_STIFF = 0.98;
-const COLL_STIFF = 0.6;
-const MIN_SEP = 0.058;
+const SOLVE_ITERS = 20;
+const DIST_STIFF = 0.72;
+const COLL_STIFF = 0.9;
+const MIN_SEP = 0.085;
+const EXACT_BONE_PASSES = 6;
+const NECK_SPRING = 0.16;
+const NECK_MAX_XZ = 0.1;
+const MAX_LOCAL_JOINT_SPEED = 2.1;
+const MAX_REMOTE_JOINT_SPEED = 2.1;
+const MAX_SUBSTEP_TRAVEL = 0.03;
+const MAX_SOLVER_SUBSTEPS = 5;
 const IMPACT_COOLDOWN_MS = 70;
 let lastImpactAt = 0;
+const LEG_PLANT_EPS = 0.002;
+const LEG_RELEASE_Y = 0.07;
+const legPlant = {
+  Left: { locked: false, ankle: new THREE.Vector3(), toe: new THREE.Vector3(), heel: new THREE.Vector3() },
+  Right: { locked: false, ankle: new THREE.Vector3(), toe: new THREE.Vector3(), heel: new THREE.Vector3() }
+};
 
 function invMass(ch, jointName, forCollision = false) {
-  if (ch === avatarLocal && pinnedTargets.has(jointName)) return forCollision ? 0.08 : 0;
+  if (ch === avatarLocal && pinnedTargets.has(jointName)) {
+    if (forCollision && jointName === 'Core') return 0;
+    return forCollision ? 0.35 : 0;
+  }
   return 1;
 }
 
-function solveDistance(ch) {
+function solveDistance(ch, stiffness = DIST_STIFF) {
   for (let i = 0; i < EDGES.length; i++) {
     const [a, b] = EDGES[i];
     const pa = ch.joints[a];
@@ -941,9 +1223,9 @@ function solveDistance(ch) {
     const dz = pb[2] - pa[2];
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-9;
     const diff = (dist - ch.edgeLens[i]) / dist;
-    const cx = dx * diff * DIST_STIFF;
-    const cy = dy * diff * DIST_STIFF;
-    const cz = dz * diff * DIST_STIFF;
+    const cx = dx * diff * stiffness;
+    const cy = dy * diff * stiffness;
+    const cz = dz * diff * stiffness;
     if (wA > 0) {
       const k = wA / wSum;
       pa[0] += cx * k;
@@ -956,6 +1238,26 @@ function solveDistance(ch) {
       pb[1] -= cy * k;
       pb[2] -= cz * k;
     }
+  }
+}
+
+function stabilizeLocalNeckSpring() {
+  const core = avatarLocal.joints.Core;
+  const neck = avatarLocal.joints.Neck;
+  if (!core || !neck) return;
+  const spineLen = avatarLocal.edgeLenByJoints('Core', 'Neck');
+  const target = [core[0], core[1] + spineLen, core[2]];
+  neck[0] += (target[0] - neck[0]) * NECK_SPRING;
+  neck[1] += (target[1] - neck[1]) * NECK_SPRING;
+  neck[2] += (target[2] - neck[2]) * NECK_SPRING;
+
+  const dx = neck[0] - core[0];
+  const dz = neck[2] - core[2];
+  const planar = Math.sqrt(dx * dx + dz * dz);
+  if (planar > NECK_MAX_XZ) {
+    const k = NECK_MAX_XZ / (planar + 1e-9);
+    neck[0] = core[0] + dx * k;
+    neck[2] = core[2] + dz * k;
   }
 }
 
@@ -1158,6 +1460,10 @@ resetBtn.addEventListener('click', () => {
   calibr.rightKneeRotRef.identity();
   calibr.leftAnkleDirRef.identity();
   calibr.rightAnkleDirRef.identity();
+  calibr.leftToeLocal.set(0, 0, 0);
+  calibr.leftHeelLocal.set(0, 0, 0);
+  calibr.rightToeLocal.set(0, 0, 0);
+  calibr.rightHeelLocal.set(0, 0, 0);
   xrState.lockedLeftKneeSource = null;
   xrState.lockedRightKneeSource = null;
   xrState.lockedLeftKneeNode = null;
@@ -1173,6 +1479,8 @@ renderer.xr.addEventListener('sessionstart', () => {
   xrState.lockedRightKneeSource = null;
   xrState.lockedLeftKneeNode = null;
   xrState.lockedRightKneeNode = null;
+  legPlant.Left.locked = false;
+  legPlant.Right.locked = false;
   refreshXRControllerList();
   refreshXRHands();
   const session = renderer.xr.getSession();
@@ -1194,6 +1502,8 @@ renderer.xr.addEventListener('sessionend', () => {
   xrState.lockedRightKneeSource = null;
   xrState.lockedLeftKneeNode = null;
   xrState.lockedRightKneeNode = null;
+  legPlant.Left.locked = false;
+  legPlant.Right.locked = false;
   refreshXRControllerList();
   refreshXRHands();
   statusEl.textContent = 'Exited VR';
@@ -1253,19 +1563,43 @@ async function loadData() {
 function step(dt) {
   avatarLocal.copyCurrentToPrev();
   avatarRemote.copyCurrentToPrev();
-  maybeAutoCalibrateFromLookUp();
+  updateGazeCalibrator();
   applyTrackingToLocalAvatar();
   applyPinned();
   driveRemoteAvatarFromState();
 
-  for (let i = 0; i < SOLVE_ITERS; i++) {
-    applyRotationChildTargets(avatarLocal, 0.24);
-    applyRotationChildTargets(avatarRemote, 0.2);
-    solveDistance(avatarLocal);
-    solveDistance(avatarRemote);
-    solveCollisions(dt);
+  capJointSpeed(avatarLocal, dt, MAX_LOCAL_JOINT_SPEED);
+  capJointSpeed(avatarRemote, dt, MAX_REMOTE_JOINT_SPEED);
+
+  const localTargets = captureJointTargets(avatarLocal);
+  const remoteTargets = captureJointTargets(avatarRemote);
+  const maxTravel = Math.max(estimateMaxTravel(avatarLocal), estimateMaxTravel(avatarRemote));
+  const substeps = Math.max(1, Math.min(MAX_SOLVER_SUBSTEPS, Math.ceil(maxTravel / MAX_SUBSTEP_TRAVEL)));
+  const itersPerSubstep = Math.max(1, Math.ceil(SOLVE_ITERS / substeps));
+
+  for (let s = 1; s <= substeps; s++) {
+    const t = s / substeps;
+    blendFromPrevToTarget(avatarLocal, localTargets, t);
+    blendFromPrevToTarget(avatarRemote, remoteTargets, t);
+    for (let i = 0; i < itersPerSubstep; i++) {
+      applyRotationChildTargets(avatarLocal, 0.24);
+      applyRotationChildTargets(avatarRemote, 0.2);
+      solveDistance(avatarLocal);
+      solveDistance(avatarRemote);
+      solveCollisions(dt / substeps);
+    }
   }
+  for (let i = 0; i < EXACT_BONE_PASSES; i++) {
+    solveDistance(avatarLocal, 1);
+    solveDistance(avatarRemote, 1);
+  }
+  stabilizeLocalNeckSpring();
   snapLocalAvatarFeetToGround();
+  for (let i = 0; i < 2; i++) {
+    solveDistance(avatarLocal, 1);
+    solveDistance(avatarRemote, 1);
+  }
+  enforceRigidFeetFromAnkles();
   avatarLocal.applyMeshes();
   avatarRemote.applyMeshes();
   tickImpacts(dt);
