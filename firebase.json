@@ -1,0 +1,34 @@
+{
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      ".firebaserc",
+      "**/.*",
+      "**/node_modules/**",
+      "*.pdf",
+      "native-unity/**",
+      "tools/**",
+      "logs/**",
+      "**/*.ps1",
+      "**/*.cmd",
+      "**/*.bat",
+      "**/*.dll",
+      "**/*.exe",
+      "**/*.so",
+      "**/*.dylib",
+      "**/*.jar"
+    ],
+    "headers": [
+      {
+        "source": "**/*.@(js|css|json|html)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      }
+    ]
+  }
+}

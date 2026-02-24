@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PVP Kickboxer V1</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="icon" href="data:,">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="ui">
+    <div class="card">
+      <div class="title">PVP Kickboxer V1</div>
+      <div class="row">
+        <button id="calibrateBtn">Calibrate</button>
+        <button id="resetBtn">Reset Pose</button>
+      </div>
+      <div id="status">Loading...</div>
+      <div id="network">Network: waiting</div>
+      <div class="hint">
+        Use hand tracking for wrists when available. Knee controllers drive knees from hip-relative calibration.
+      </div>
+    </div>
+  </div>
+  <canvas id="c"></canvas>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
