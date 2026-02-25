@@ -69,6 +69,8 @@ const GAZE_CALIB_DWELL_MS = 1000;
 const GAZE_CALIB_COOLDOWN_MS = 800;
 const GAZE_CALIB_ANGLE_DEG = 8;
 const GAZE_CALIB_ABOVE_MID_Y = 0.45;
+const CALIB_POSE_HOLD_HEAD_EPS = 0.02;
+const CALIB_POSE_HOLD_CTRL_EPS = 0.03;
 const CALIB_PREVIEW_DISTANCE = 1.05;
 const AVATAR_SCALE = 0.92;
 const BASE_BONE_RADIUS = 0.019;
@@ -432,6 +434,59 @@ const calibr = {
   rightToeLocal: new THREE.Vector3(),
   rightHeelLocal: new THREE.Vector3()
 };
+const calibrationPoseHold = {
+  active: false,
+  pose: null,
+  headRef: new THREE.Vector3(),
+  leftCtrlRef: null,
+  rightCtrlRef: null
+};
+let holdLocalPoseThisFrame = false;
+
+function clearCalibrationPoseHold() {
+  calibrationPoseHold.active = false;
+  calibrationPoseHold.pose = null;
+  calibrationPoseHold.leftCtrlRef = null;
+  calibrationPoseHold.rightCtrlRef = null;
+}
+
+function armCalibrationPoseHold(headPos, leftCtrlPos, rightCtrlPos) {
+  calibrationPoseHold.active = true;
+  calibrationPoseHold.pose = avatarLocal.snapshot();
+  calibrationPoseHold.headRef.copy(headPos);
+  calibrationPoseHold.leftCtrlRef = leftCtrlPos ? leftCtrlPos.clone() : null;
+  calibrationPoseHold.rightCtrlRef = rightCtrlPos ? rightCtrlPos.clone() : null;
+}
+
+function shouldHoldCalibratedPose(headPos, leftCtrlPos, rightCtrlPos) {
+  if (!calibrationPoseHold.active || !calibrationPoseHold.pose) return false;
+
+  if (headPos.distanceToSquared(calibrationPoseHold.headRef) > CALIB_POSE_HOLD_HEAD_EPS * CALIB_POSE_HOLD_HEAD_EPS) {
+    clearCalibrationPoseHold();
+    return false;
+  }
+
+  const movedCtrl = (ref, cur) => {
+    if (!ref && !cur) return false;
+    if (!ref || !cur) return true;
+    return ref.distanceToSquared(cur) > CALIB_POSE_HOLD_CTRL_EPS * CALIB_POSE_HOLD_CTRL_EPS;
+  };
+
+  if (movedCtrl(calibrationPoseHold.leftCtrlRef, leftCtrlPos) || movedCtrl(calibrationPoseHold.rightCtrlRef, rightCtrlPos)) {
+    clearCalibrationPoseHold();
+    return false;
+  }
+
+  return true;
+}
+
+function pinCalibrationPoseSnapshot() {
+  if (!calibrationPoseHold.pose) return;
+  for (const j of JOINTS) {
+    const p = calibrationPoseHold.pose[j];
+    setPinned(j, new THREE.Vector3(p[0], p[1], p[2]), 1);
+  }
+}
 
 function saveCalibration() {
   localStorage.setItem(CALIB_STORAGE_KEY, JSON.stringify({
@@ -835,6 +890,7 @@ function calibrateNow() {
   xrState.lockedLeftKneeNode = leftCtrl || null;
   xrState.lockedRightKneeNode = rightCtrl || null;
   calibr.valid = true;
+  armCalibrationPoseHold(head, leftKneeCtrlPos, rightKneeCtrlPos);
   captureAnkleDirectionReference();
   captureRigidFootReference();
   saveCalibration();
@@ -844,6 +900,7 @@ function calibrateNow() {
 function clearCalibrationOnly() {
   if (startPose) avatarLocal.restore(startPose);
   if (remoteStartPose) avatarRemote.restore(remoteStartPose);
+  clearCalibrationPoseHold();
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
   calibr.valid = false;
@@ -938,6 +995,7 @@ function applyPinned() {
 }
 
 function applyTrackingToLocalAvatar() {
+  holdLocalPoseThisFrame = false;
   pinnedTargets.clear();
   if (!renderer.xr.isPresenting) return;
 
@@ -985,6 +1043,12 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
   const activeRightKneeCtrl = calibr.valid ? (xrState.lockedRightKneeNode || dev.rightKneeCtrl) : dev.rightKneeCtrl;
   const leftKneeCtrlPos = getControllerLocalPos(activeLeftKneeCtrl);
   const rightKneeCtrlPos = getControllerLocalPos(activeRightKneeCtrl);
+  if (shouldHoldCalibratedPose(head, leftKneeCtrlPos, rightKneeCtrlPos)) {
+    pinCalibrationPoseSnapshot();
+    holdLocalPoseThisFrame = true;
+    statusEl.textContent = 'Calibrated: pose held until movement.';
+    return;
+  }
   const leftCtrlAdjusted = leftKneeCtrlPos ? leftKneeCtrlPos.clone().add(calibr.leftKneeOffset) : null;
   const rightCtrlAdjusted = rightKneeCtrlPos ? rightKneeCtrlPos.clone().add(calibr.rightKneeOffset) : null;
   let leftGrounded = updateLegPlantLock('Left', leftCtrlAdjusted);
@@ -1638,6 +1702,7 @@ function poseCentering() {
 resetBtn.addEventListener('click', () => {
   if (startPose) avatarLocal.restore(startPose);
   if (remoteStartPose) avatarRemote.restore(remoteStartPose);
+  clearCalibrationPoseHold();
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
   calibr.valid = false;
@@ -1669,6 +1734,7 @@ renderer.xr.addEventListener('sessionstart', () => {
   legPlant.Left.locked = false;
   legPlant.Right.locked = false;
   coreGroundConstraint.active = false;
+  clearCalibrationPoseHold();
   refreshXRControllerList();
   refreshXRHands();
   const session = renderer.xr.getSession();
@@ -1694,6 +1760,7 @@ renderer.xr.addEventListener('sessionend', () => {
   legPlant.Left.locked = false;
   legPlant.Right.locked = false;
   coreGroundConstraint.active = false;
+  clearCalibrationPoseHold();
   refreshXRControllerList();
   refreshXRHands();
   statusEl.textContent = 'Exited VR';
@@ -1762,6 +1829,15 @@ function step(dt) {
 
   // Pre-calibration should be rigid preview only; skip all local solver passes.
   if (!calibr.valid) {
+    avatarLocal.applyMeshes();
+    avatarRemote.applyMeshes();
+    tickImpacts(dt);
+    poseCentering();
+    if (!renderer.xr.isPresenting) controls.update();
+    return;
+  }
+
+  if (holdLocalPoseThisFrame) {
     avatarLocal.applyMeshes();
     avatarRemote.applyMeshes();
     tickImpacts(dt);
