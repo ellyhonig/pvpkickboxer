@@ -68,19 +68,24 @@ const CALIB_STORAGE_KEY = 'pvpkickboxer_calib_v2';
 const GAZE_CALIB_DWELL_MS = 1000;
 const GAZE_CALIB_COOLDOWN_MS = 800;
 const GAZE_CALIB_ANGLE_DEG = 8;
-const GAZE_CALIB_FIXED_POS = new THREE.Vector3(0.9, 1.25, 0.0);
+const GAZE_CALIB_ABOVE_MID_Y = 0.45;
+const CALIB_PREVIEW_DISTANCE = 1.05;
+const AVATAR_SCALE = 0.92;
+const BASE_BONE_RADIUS = 0.019;
+const TORSO_RADIUS_MULT = 5;
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
 renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 0);
 renderer.xr.enabled = true;
 document.body.appendChild(VRButton.createButton(renderer, {
   requiredFeatures: ['hand-tracking'],
-  optionalFeatures: ['local-floor', 'bounded-floor']
+  optionalFeatures: ['local-floor', 'bounded-floor', 'passthrough']
 }));
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x0a0f14, 2.5, 14);
+scene.fog = null;
 const world = new THREE.Group();
 scene.add(world);
 
@@ -198,6 +203,77 @@ function updateArrow(helper, origin, target) {
   helper.setLength(len);
 }
 
+function scaleCharacter(ch, scale) {
+  const core = ch.joints.Core;
+  if (!core) return;
+  for (const j of JOINTS) {
+    const p = ch.joints[j];
+    p[0] = core[0] + (p[0] - core[0]) * scale;
+    p[1] = core[1] + (p[1] - core[1]) * scale;
+    p[2] = core[2] + (p[2] - core[2]) * scale;
+  }
+  ch.recomputeLens();
+  ch.initRotFromPose();
+  ch.applyMeshes();
+}
+
+function getAvatarForwardXZ(ch) {
+  const c = ch.joints.Core;
+  const n = ch.joints.Neck;
+  if (c && n) {
+    const f = new THREE.Vector3(n[0] - c[0], 0, n[2] - c[2]);
+    if (f.lengthSq() > 1e-6) return f.normalize();
+  }
+  const lh = ch.joints.LeftHip;
+  const rh = ch.joints.RightHip;
+  if (lh && rh) {
+    const right = new THREE.Vector3(rh[0] - lh[0], 0, rh[2] - lh[2]).normalize();
+    const f = new THREE.Vector3().crossVectors(right, new THREE.Vector3(0, 1, 0));
+    if (f.lengthSq() > 1e-6) return f.normalize();
+  }
+  return new THREE.Vector3(0, 0, 1);
+}
+
+function placeAvatarInFrontForCalibration(head, forwardXZ) {
+  const coreNow = getJointVec('Core');
+  const desiredCore = head.clone().add(forwardXZ.clone().multiplyScalar(CALIB_PREVIEW_DISTANCE));
+  desiredCore.y = coreNow.y;
+
+  const currentForward = getAvatarForwardXZ(avatarLocal);
+  const q = new THREE.Quaternion().setFromUnitVectors(currentForward, forwardXZ);
+  for (const j of JOINTS) {
+    const p = getJointVec(j).sub(coreNow).applyQuaternion(q).add(desiredCore);
+    avatarLocal.joints[j] = [p.x, p.y, p.z];
+  }
+}
+
+function getCalibrationFacingDirectionXZ(headForwardXZ, headPos, rightHandCtrl) {
+  const facing = headForwardXZ.clone();
+  const rightCtrlPos = getControllerLocalPos(rightHandCtrl);
+  if (!rightCtrlPos) return facing;
+
+  const rightDir = rightCtrlPos.sub(headPos);
+  rightDir.y = 0;
+  if (rightDir.lengthSq() < 1e-6) return facing;
+  rightDir.normalize();
+
+  facing.add(rightDir);
+  if (facing.lengthSq() < 1e-6) return headForwardXZ.clone();
+  return facing.normalize();
+}
+
+function getGazeCalibratorTargetPos() {
+  const localCore = getJointVec('Core');
+  const remoteCore = new THREE.Vector3().fromArray(avatarRemote.joints.Core);
+  const localHead = getJointVec('Head');
+  const remoteHead = new THREE.Vector3().fromArray(avatarRemote.joints.Head);
+
+  const mid = localCore.clone().add(remoteCore).multiplyScalar(0.5);
+  const topY = Math.max(localHead.y, remoteHead.y);
+  mid.y = topY + GAZE_CALIB_ABOVE_MID_Y;
+  return mid;
+}
+
 function hmdLocalForward() {
   const xrCam = renderer.xr.getCamera(camera);
   const dirW = new THREE.Vector3();
@@ -245,7 +321,7 @@ class StickCharacter {
 
     for (const [a, b] of EDGES) {
       const isTorso = TORSO_EDGE_KEYS.has(edgeKey(a, b));
-      const radius = isTorso ? 0.031 : 0.019;
+      const radius = isTorso ? BASE_BONE_RADIUS * TORSO_RADIUS_MULT : BASE_BONE_RADIUS;
       const bGeo = new THREE.CylinderGeometry(radius, radius, 1, 8);
       const bMat = new THREE.MeshStandardMaterial({ color, roughness: 0.7 });
       const mesh = new THREE.Mesh(bGeo, bMat);
@@ -766,6 +842,8 @@ function calibrateNow() {
 }
 
 function clearCalibrationOnly() {
+  if (startPose) avatarLocal.restore(startPose);
+  if (remoteStartPose) avatarRemote.restore(remoteStartPose);
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
   calibr.valid = false;
@@ -800,10 +878,10 @@ function updateGazeCalibrator() {
 
   const head = hmdLocalPos();
   const forward = hmdLocalForward();
-  const targetPos = GAZE_CALIB_FIXED_POS;
+  const targetPos = getGazeCalibratorTargetPos();
   gazeCalib.marker.visible = true;
   gazeCalib.marker.position.copy(targetPos);
-  gazeCalib.marker.lookAt(new THREE.Vector3(targetPos.x, targetPos.y, targetPos.z + 1));
+  gazeCalib.marker.lookAt(head);
   gazeCalib.coreMesh.material.color.setHex(calibr.valid ? 0xff7a7a : 0x2ee6a8);
 
   const hmdToMarker = targetPos.clone().sub(head);
@@ -865,6 +943,11 @@ function applyTrackingToLocalAvatar() {
 
   const dev = classifyControllersByBody(forceTrackers);
   const head = hmdLocalPos();
+  const forwardXZ = hmdLocalForward();
+  forwardXZ.y = 0;
+  if (forwardXZ.lengthSq() < 1e-6) forwardXZ.set(0, 0, 1);
+  forwardXZ.normalize();
+  const calibrationFacingXZ = getCalibrationFacingDirectionXZ(forwardXZ, head, dev.rightHandCtrl);
   let coreTarget = head.clone().add(calibr.waistOffset);
   const headFromCore = head.clone().sub(coreTarget);
   if (headFromCore.lengthSq() < 1e-8) headFromCore.set(0, 1, 0);
@@ -876,6 +959,7 @@ function applyTrackingToLocalAvatar() {
 
   if (!calibr.valid) {
     coreGroundConstraint.active = false;
+    placeAvatarInFrontForCalibration(head, calibrationFacingXZ);
     if (DEBUG_VIS) {
       debugHud.textContent =
 `mode=pre-calibration
@@ -903,59 +987,54 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
   const rightKneeCtrlPos = getControllerLocalPos(activeRightKneeCtrl);
   const leftCtrlAdjusted = leftKneeCtrlPos ? leftKneeCtrlPos.clone().add(calibr.leftKneeOffset) : null;
   const rightCtrlAdjusted = rightKneeCtrlPos ? rightKneeCtrlPos.clone().add(calibr.rightKneeOffset) : null;
-  const leftGrounded = updateLegPlantLock('Left', leftCtrlAdjusted);
-  const rightGrounded = updateLegPlantLock('Right', rightCtrlAdjusted);
-  if (leftGrounded || rightGrounded) {
-    if (!coreGroundConstraint.active) {
-      coreGroundConstraint.pos.fromArray(avatarLocal.joints.Core);
-      coreGroundConstraint.active = true;
+  let leftGrounded = updateLegPlantLock('Left', leftCtrlAdjusted);
+  let rightGrounded = updateLegPlantLock('Right', rightCtrlAdjusted);
+
+  // Keep at least one planted leg support in calibrated mode.
+  if (!leftGrounded && !rightGrounded) {
+    const leftY = getLegMinFootY('Left');
+    const rightY = getLegMinFootY('Right');
+    if (leftY <= rightY) {
+      lockLegAtCurrentPose('Left');
+      leftGrounded = true;
+    } else {
+      lockLegAtCurrentPose('Right');
+      rightGrounded = true;
     }
-    coreTarget = coreGroundConstraint.pos.clone();
-    const cToH = head.clone().sub(coreTarget);
-    if (cToH.lengthSq() > 1e-8) neckTarget = coreTarget.clone().addScaledVector(cToH.normalize(), getSpineDistance());
-  } else {
-    coreGroundConstraint.active = false;
   }
+  coreGroundConstraint.active = false;
 
   if (leftGrounded && legPlant.Left.locked) {
-    const solved = solveGroundedLegFromCore('Left', coreTarget, legPlant.Left.ankle);
+    const solved = solveGroundedLegFromCore('Left', coreTarget, legPlant.Left.ankle, leftCtrlAdjusted);
     leftHipTarget = solved.hipTarget;
     leftKneeTarget = solved.kneeTarget;
     setPinned('LeftAnkle', legPlant.Left.ankle, 1);
     setPinned('LeftToe', legPlant.Left.toe, 1);
     setPinned('LeftHeel', legPlant.Left.heel, 1);
-    setPinned('LeftHip', leftHipTarget, 1);
-    setPinned('LeftKnee', leftKneeTarget, 1);
+    setPinned('LeftHip', leftHipTarget, HIP_KNEE_PIN_SMOOTH);
+    setPinned('LeftKnee', leftKneeTarget, HIP_KNEE_PIN_SMOOTH);
   } else if (leftKneeCtrlPos) {
-      const coreToHipLen = avatarLocal.edgeLenByJoints('Core', 'LeftHip');
-      const leftDir = leftCtrlAdjusted.clone().sub(coreTarget);
-      if (leftDir.lengthSq() < 1e-8) leftDir.set(-1, -0.2, 0);
-      leftDir.normalize();
-      leftHipTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen);
-      const thighLen = avatarLocal.edgeLenByJoints('LeftHip', 'LeftKnee');
-      leftKneeTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen + thighLen);
-      setPinned('LeftHip', leftHipTarget, 1);
-      setPinned('LeftKnee', leftKneeTarget, 1);
+      const solved = solveFreeLegRigidStickFromCore('Left', coreTarget, leftCtrlAdjusted);
+      leftHipTarget = solved.hipTarget;
+      leftKneeTarget = solved.kneeTarget;
+      setPinned('LeftHip', leftHipTarget, HIP_KNEE_PIN_SMOOTH);
+      setPinned('LeftKnee', leftKneeTarget, HIP_KNEE_PIN_SMOOTH);
   }
   if (rightGrounded && legPlant.Right.locked) {
-    const solved = solveGroundedLegFromCore('Right', coreTarget, legPlant.Right.ankle);
+    const solved = solveGroundedLegFromCore('Right', coreTarget, legPlant.Right.ankle, rightCtrlAdjusted);
     rightHipTarget = solved.hipTarget;
     rightKneeTarget = solved.kneeTarget;
     setPinned('RightAnkle', legPlant.Right.ankle, 1);
     setPinned('RightToe', legPlant.Right.toe, 1);
     setPinned('RightHeel', legPlant.Right.heel, 1);
-    setPinned('RightHip', rightHipTarget, 1);
-    setPinned('RightKnee', rightKneeTarget, 1);
+    setPinned('RightHip', rightHipTarget, HIP_KNEE_PIN_SMOOTH);
+    setPinned('RightKnee', rightKneeTarget, HIP_KNEE_PIN_SMOOTH);
   } else if (rightKneeCtrlPos) {
-      const coreToHipLen = avatarLocal.edgeLenByJoints('Core', 'RightHip');
-      const rightDir = rightCtrlAdjusted.clone().sub(coreTarget);
-      if (rightDir.lengthSq() < 1e-8) rightDir.set(1, -0.2, 0);
-      rightDir.normalize();
-      rightHipTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen);
-      const thighLen = avatarLocal.edgeLenByJoints('RightHip', 'RightKnee');
-      rightKneeTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen + thighLen);
-      setPinned('RightHip', rightHipTarget, 1);
-      setPinned('RightKnee', rightKneeTarget, 1);
+      const solved = solveFreeLegRigidStickFromCore('Right', coreTarget, rightCtrlAdjusted);
+      rightHipTarget = solved.hipTarget;
+      rightKneeTarget = solved.kneeTarget;
+      setPinned('RightHip', rightHipTarget, HIP_KNEE_PIN_SMOOTH);
+      setPinned('RightKnee', rightKneeTarget, HIP_KNEE_PIN_SMOOTH);
   }
 
   const qL = getControllerLocalQuat(activeLeftKneeCtrl);
@@ -997,7 +1076,7 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
 }
 
 function isLegGroundContact(side) {
-  return getLegMinFootY(side) < 0;
+  return getLegMinFootY(side) <= FLOOR_CONTACT_EPS;
 }
 
 function getLegMinFootY(side) {
@@ -1028,6 +1107,14 @@ function updateLegPlantLock(side, controllerTargetPos = null) {
   return state.locked;
 }
 
+function lockLegAtCurrentPose(side) {
+  const state = legPlant[side];
+  state.ankle.fromArray(avatarLocal.joints[`${side}Ankle`]);
+  state.toe.fromArray(avatarLocal.joints[`${side}Toe`]);
+  state.heel.fromArray(avatarLocal.joints[`${side}Heel`]);
+  state.locked = true;
+}
+
 function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = null) {
   const thigh = avatarLocal.edgeLenByJoints(`${side}Hip`, `${side}Knee`);
   const shin = avatarLocal.edgeLenByJoints(`${side}Knee`, `${side}Ankle`);
@@ -1055,13 +1142,63 @@ function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = nul
   return knee;
 }
 
-function solveGroundedLegFromCore(side, coreTarget, ankleTarget) {
+function solveGroundedLegFromCore(side, coreTarget, ankleTarget, controllerPos = null) {
   const coreToHipLen = avatarLocal.edgeLenByJoints('Core', `${side}Hip`);
-  let hipDir = getJointVec(`${side}Hip`).sub(coreTarget);
-  if (hipDir.lengthSq() < 1e-8) hipDir.set(side === 'Left' ? -1 : 1, -0.2, 0);
-  hipDir.normalize();
-  const hipTarget = coreTarget.clone().addScaledVector(hipDir, coreToHipLen);
-  const kneeTarget = solveKneeFromHipAnkle(side, hipTarget, ankleTarget, null);
+  const thighLen = avatarLocal.edgeLenByJoints(`${side}Hip`, `${side}Knee`);
+  const shinLen = avatarLocal.edgeLenByJoints(`${side}Knee`, `${side}Ankle`);
+  const minHA = Math.abs(thighLen - shinLen) + 1e-4;
+  const maxHA = thighLen + shinLen - 1e-4;
+
+  let desiredDir = (controllerPos ? controllerPos.clone() : ankleTarget.clone()).sub(coreTarget);
+  if (desiredDir.lengthSq() < 1e-8) desiredDir.copy(getJointVec(`${side}Hip`).sub(coreTarget));
+  if (desiredDir.lengthSq() < 1e-8) desiredDir.set(side === 'Left' ? -1 : 1, -0.2, 0);
+  desiredDir.normalize();
+
+  const ca = ankleTarget.clone().sub(coreTarget);
+  const caLen = ca.length();
+  let hipTarget = coreTarget.clone().addScaledVector(desiredDir, coreToHipLen);
+
+  if (caLen > 1e-6) {
+    const caDir = ca.clone().multiplyScalar(1 / caLen);
+    const feasibleMin = Math.max(Math.abs(coreToHipLen - caLen), minHA);
+    const feasibleMax = Math.min(coreToHipLen + caLen, maxHA);
+    if (feasibleMin <= feasibleMax) {
+      const currentHA = hipTarget.distanceTo(ankleTarget);
+      const targetHA = clamp(currentHA, feasibleMin, feasibleMax);
+      const x = clamp(
+        (coreToHipLen * coreToHipLen + caLen * caLen - targetHA * targetHA) / (2 * caLen),
+        -coreToHipLen,
+        coreToHipLen
+      );
+      const r = Math.sqrt(Math.max(0, coreToHipLen * coreToHipLen - x * x));
+      let perp = desiredDir.clone().addScaledVector(caDir, -desiredDir.dot(caDir));
+      if (perp.lengthSq() < 1e-8) perp = getJointVec(`${side}Hip`).sub(coreTarget).addScaledVector(caDir, -getJointVec(`${side}Hip`).sub(coreTarget).dot(caDir));
+      if (perp.lengthSq() < 1e-8) perp.set(side === 'Left' ? -1 : 1, 0, 0).addScaledVector(caDir, -caDir.x * (side === 'Left' ? -1 : 1));
+      perp.normalize();
+      hipTarget = coreTarget.clone().addScaledVector(caDir, x).addScaledVector(perp, r);
+    }
+  }
+
+  const kneeTarget = solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos);
+  return { hipTarget, kneeTarget };
+}
+
+function solveFreeLegRigidStickFromCore(side, coreTarget, controllerPos = null) {
+  const coreToHipLen = avatarLocal.edgeLenByJoints('Core', `${side}Hip`);
+  const hipToKneeLen = avatarLocal.edgeLenByJoints(`${side}Hip`, `${side}Knee`);
+
+  let desiredDir = (controllerPos ? controllerPos.clone() : getJointVec(`${side}Knee`)).sub(coreTarget);
+  if (desiredDir.lengthSq() < 1e-8) desiredDir.copy(getJointVec(`${side}Hip`).sub(coreTarget));
+  if (desiredDir.lengthSq() < 1e-8) desiredDir.set(side === 'Left' ? -1 : 1, -0.2, 0);
+  desiredDir.normalize();
+
+  let currentDir = getJointVec(`${side}Knee`).sub(coreTarget);
+  if (currentDir.lengthSq() < 1e-8) currentDir = desiredDir.clone();
+  else currentDir.normalize();
+
+  const solvedDir = currentDir.lerp(desiredDir, FREE_LEG_DIR_BLEND).normalize();
+  const hipTarget = coreTarget.clone().addScaledVector(solvedDir, coreToHipLen);
+  const kneeTarget = coreTarget.clone().addScaledVector(solvedDir, coreToHipLen + hipToKneeLen);
   return { hipTarget, kneeTarget };
 }
 
@@ -1071,16 +1208,31 @@ function snapLocalAvatarFeetToGround() {
   const leftChain = ['LeftHip', 'LeftKnee', 'LeftAnkle', 'LeftToe', 'LeftHeel'];
   const rightChain = ['RightHip', 'RightKnee', 'RightAnkle', 'RightToe', 'RightHeel'];
 
-  const leftMinY = getLegMinFootY('Left');
-  const rightMinY = getLegMinFootY('Right');
+  let leftMinY = getLegMinFootY('Left');
+  let rightMinY = getLegMinFootY('Right');
 
-  // Disabled "above 0 pull-down" logic: only correct below-floor per leg.
+  // If both feet are above the floor, shift the whole avatar down to first contact.
+  const anyGroundContact = (leftMinY <= FLOOR_CONTACT_EPS) || (rightMinY <= FLOOR_CONTACT_EPS);
+  if (!anyGroundContact) {
+    const minFootY = Math.min(leftMinY, rightMinY);
+    if (Number.isFinite(minFootY) && minFootY > FLOOR_CONTACT_EPS) {
+      for (const j of JOINTS) avatarLocal.joints[j][1] -= minFootY;
+      leftMinY -= minFootY;
+      rightMinY -= minFootY;
+    }
+  }
+
+  // Correct below-floor penetration per leg when not planted.
   if (!legPlant.Left.locked && Number.isFinite(leftMinY) && leftMinY < 0) {
     for (const j of leftChain) avatarLocal.joints[j][1] -= leftMinY;
   }
   if (!legPlant.Right.locked && Number.isFinite(rightMinY) && rightMinY < 0) {
     for (const j of rightChain) avatarLocal.joints[j][1] -= rightMinY;
   }
+
+  // Allow lock to engage immediately after contact.
+  updateLegPlantLock('Left');
+  updateLegPlantLock('Right');
 }
 
 function enforceRigidFeetFromAnkles() {
@@ -1225,6 +1377,9 @@ const MAX_SOLVER_SUBSTEPS = 5;
 const IMPACT_COOLDOWN_MS = 70;
 let lastImpactAt = 0;
 const LEG_RELEASE_Y = 0.07;
+const FLOOR_CONTACT_EPS = 0.001;
+const HIP_KNEE_PIN_SMOOTH = 0.32;
+const FREE_LEG_DIR_BLEND = 0.55;
 const legPlant = {
   Left: { locked: false, ankle: new THREE.Vector3(), toe: new THREE.Vector3(), heel: new THREE.Vector3() },
   Right: { locked: false, ankle: new THREE.Vector3(), toe: new THREE.Vector3(), heel: new THREE.Vector3() }
@@ -1236,8 +1391,7 @@ const coreGroundConstraint = {
 
 function invMass(ch, jointName, forCollision = false) {
   if (ch === avatarLocal && pinnedTargets.has(jointName)) {
-    if (forCollision && jointName === 'Core') return 0;
-    return forCollision ? 0.35 : 0;
+    return 0;
   }
   return 1;
 }
@@ -1525,8 +1679,9 @@ renderer.xr.addEventListener('sessionstart', () => {
     const h = s.handedness || 'none';
     return `${mode}:${h}:${p}`;
   });
+  const blend = session?.environmentBlendMode || 'opaque';
   const base = calibr.valid ? 'VR running; using saved calibration' : 'VR running; press Calibrate once in neutral stance';
-  statusEl.textContent = `${base} features=[${enabled}] sources=${sourceKinds.length}`;
+  statusEl.textContent = `${base} blend=${blend} features=[${enabled}] sources=${sourceKinds.length}`;
 });
 
 renderer.xr.addEventListener('sessionend', () => {
@@ -1587,6 +1742,8 @@ async function loadData() {
   const p = poses[startIdx];
   avatarLocal.setPose(p.position[0]);
   avatarRemote.setPose(p.position[1]);
+  scaleCharacter(avatarLocal, AVATAR_SCALE);
+  scaleCharacter(avatarRemote, AVATAR_SCALE);
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
   startPose = avatarLocal.snapshot();
@@ -1602,6 +1759,16 @@ function step(dt) {
   applyTrackingToLocalAvatar();
   applyPinned();
   driveRemoteAvatarFromState();
+
+  // Pre-calibration should be rigid preview only; skip all local solver passes.
+  if (!calibr.valid) {
+    avatarLocal.applyMeshes();
+    avatarRemote.applyMeshes();
+    tickImpacts(dt);
+    poseCentering();
+    if (!renderer.xr.isPresenting) controls.update();
+    return;
+  }
 
   capJointSpeed(avatarLocal, dt, MAX_LOCAL_JOINT_SPEED);
   capJointSpeed(avatarRemote, dt, MAX_REMOTE_JOINT_SPEED);
