@@ -781,6 +781,7 @@ function clearCalibrationOnly() {
   calibr.rightHeelLocal.set(0, 0, 0);
   legPlant.Left.locked = false;
   legPlant.Right.locked = false;
+  coreGroundConstraint.active = false;
   xrState.lockedLeftKneeSource = null;
   xrState.lockedRightKneeSource = null;
   xrState.lockedLeftKneeNode = null;
@@ -864,16 +865,17 @@ function applyTrackingToLocalAvatar() {
 
   const dev = classifyControllersByBody(forceTrackers);
   const head = hmdLocalPos();
-  const coreTarget = head.clone().add(calibr.waistOffset);
+  let coreTarget = head.clone().add(calibr.waistOffset);
   const headFromCore = head.clone().sub(coreTarget);
   if (headFromCore.lengthSq() < 1e-8) headFromCore.set(0, 1, 0);
-  const neckTarget = coreTarget.clone().addScaledVector(headFromCore.normalize(), getSpineDistance());
+  let neckTarget = coreTarget.clone().addScaledVector(headFromCore.normalize(), getSpineDistance());
   let leftHipTarget = null;
   let leftKneeTarget = null;
   let rightHipTarget = null;
   let rightKneeTarget = null;
 
   if (!calibr.valid) {
+    coreGroundConstraint.active = false;
     if (DEBUG_VIS) {
       debugHud.textContent =
 `mode=pre-calibration
@@ -903,51 +905,66 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
   const rightCtrlAdjusted = rightKneeCtrlPos ? rightKneeCtrlPos.clone().add(calibr.rightKneeOffset) : null;
   const leftGrounded = updateLegPlantLock('Left', leftCtrlAdjusted);
   const rightGrounded = updateLegPlantLock('Right', rightCtrlAdjusted);
-
-  if (leftKneeCtrlPos) {
-    const coreToHipLen = avatarLocal.edgeLenByJoints('Core', 'LeftHip');
-    const leftDir = leftCtrlAdjusted.clone().sub(coreTarget);
-    if (leftDir.lengthSq() < 1e-8) leftDir.set(-1, -0.2, 0);
-    leftDir.normalize();
-    leftHipTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen);
-    if (leftGrounded && legPlant.Left.locked) {
-      leftKneeTarget = solveKneeFromHipAnkle('Left', leftHipTarget, legPlant.Left.ankle, leftCtrlAdjusted);
-      setPinned('LeftAnkle', legPlant.Left.ankle, 1);
-      setPinned('LeftToe', legPlant.Left.toe, 1);
-      setPinned('LeftHeel', legPlant.Left.heel, 1);
-    } else {
-      const thighLen = avatarLocal.edgeLenByJoints('LeftHip', 'LeftKnee');
-      leftKneeTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen + thighLen);
+  if (leftGrounded || rightGrounded) {
+    if (!coreGroundConstraint.active) {
+      coreGroundConstraint.pos.fromArray(avatarLocal.joints.Core);
+      coreGroundConstraint.active = true;
     }
+    coreTarget = coreGroundConstraint.pos.clone();
+    const cToH = head.clone().sub(coreTarget);
+    if (cToH.lengthSq() > 1e-8) neckTarget = coreTarget.clone().addScaledVector(cToH.normalize(), getSpineDistance());
+  } else {
+    coreGroundConstraint.active = false;
+  }
+
+  if (leftGrounded && legPlant.Left.locked) {
+    const solved = solveGroundedLegFromCore('Left', coreTarget, legPlant.Left.ankle);
+    leftHipTarget = solved.hipTarget;
+    leftKneeTarget = solved.kneeTarget;
+    setPinned('LeftAnkle', legPlant.Left.ankle, 1);
+    setPinned('LeftToe', legPlant.Left.toe, 1);
+    setPinned('LeftHeel', legPlant.Left.heel, 1);
     setPinned('LeftHip', leftHipTarget, 1);
     setPinned('LeftKnee', leftKneeTarget, 1);
+  } else if (leftKneeCtrlPos) {
+      const coreToHipLen = avatarLocal.edgeLenByJoints('Core', 'LeftHip');
+      const leftDir = leftCtrlAdjusted.clone().sub(coreTarget);
+      if (leftDir.lengthSq() < 1e-8) leftDir.set(-1, -0.2, 0);
+      leftDir.normalize();
+      leftHipTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen);
+      const thighLen = avatarLocal.edgeLenByJoints('LeftHip', 'LeftKnee');
+      leftKneeTarget = coreTarget.clone().addScaledVector(leftDir, coreToHipLen + thighLen);
+      setPinned('LeftHip', leftHipTarget, 1);
+      setPinned('LeftKnee', leftKneeTarget, 1);
   }
-  if (rightKneeCtrlPos) {
-    const coreToHipLen = avatarLocal.edgeLenByJoints('Core', 'RightHip');
-    const rightDir = rightCtrlAdjusted.clone().sub(coreTarget);
-    if (rightDir.lengthSq() < 1e-8) rightDir.set(1, -0.2, 0);
-    rightDir.normalize();
-    rightHipTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen);
-    if (rightGrounded && legPlant.Right.locked) {
-      rightKneeTarget = solveKneeFromHipAnkle('Right', rightHipTarget, legPlant.Right.ankle, rightCtrlAdjusted);
-      setPinned('RightAnkle', legPlant.Right.ankle, 1);
-      setPinned('RightToe', legPlant.Right.toe, 1);
-      setPinned('RightHeel', legPlant.Right.heel, 1);
-    } else {
-      const thighLen = avatarLocal.edgeLenByJoints('RightHip', 'RightKnee');
-      rightKneeTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen + thighLen);
-    }
+  if (rightGrounded && legPlant.Right.locked) {
+    const solved = solveGroundedLegFromCore('Right', coreTarget, legPlant.Right.ankle);
+    rightHipTarget = solved.hipTarget;
+    rightKneeTarget = solved.kneeTarget;
+    setPinned('RightAnkle', legPlant.Right.ankle, 1);
+    setPinned('RightToe', legPlant.Right.toe, 1);
+    setPinned('RightHeel', legPlant.Right.heel, 1);
     setPinned('RightHip', rightHipTarget, 1);
     setPinned('RightKnee', rightKneeTarget, 1);
+  } else if (rightKneeCtrlPos) {
+      const coreToHipLen = avatarLocal.edgeLenByJoints('Core', 'RightHip');
+      const rightDir = rightCtrlAdjusted.clone().sub(coreTarget);
+      if (rightDir.lengthSq() < 1e-8) rightDir.set(1, -0.2, 0);
+      rightDir.normalize();
+      rightHipTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen);
+      const thighLen = avatarLocal.edgeLenByJoints('RightHip', 'RightKnee');
+      rightKneeTarget = coreTarget.clone().addScaledVector(rightDir, coreToHipLen + thighLen);
+      setPinned('RightHip', rightHipTarget, 1);
+      setPinned('RightKnee', rightKneeTarget, 1);
   }
 
   const qL = getControllerLocalQuat(activeLeftKneeCtrl);
   const qR = getControllerLocalQuat(activeRightKneeCtrl);
-  if (qL && !leftGrounded) {
+  if (qL && !legPlant.Left.locked) {
     const delta = qL.clone().multiply(calibr.leftKneeRotRef.clone().invert()).normalize();
     avatarLocal.rot.LeftKnee.copy(delta.multiply(calibr.leftAnkleDirRef));
   }
-  if (qR && !rightGrounded) {
+  if (qR && !legPlant.Right.locked) {
     const delta = qR.clone().multiply(calibr.rightKneeRotRef.clone().invert()).normalize();
     avatarLocal.rot.RightKnee.copy(delta.multiply(calibr.rightAnkleDirRef));
   }
@@ -963,7 +980,7 @@ lockedR=${sourceLabel(xrState.lockedRightKneeSource)}
 liveL=${sourceLabel(activeLeftKneeCtrl)}
 liveR=${sourceLabel(activeRightKneeCtrl)}
 qL=${lRot} qR=${rRot}
-groundL=${leftGrounded ? '1' : '0'} groundR=${rightGrounded ? '1' : '0'}
+lockL=${legPlant.Left.locked ? '1' : '0'} lockR=${legPlant.Right.locked ? '1' : '0'}
 waist=(${coreTarget.x.toFixed(2)}, ${coreTarget.y.toFixed(2)}, ${coreTarget.z.toFixed(2)})
 neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.toFixed(2)})`;
     updateArrow(debugArrows.waistToHmd, coreTarget, head);
@@ -980,32 +997,38 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
 }
 
 function isLegGroundContact(side) {
+  return getLegMinFootY(side) < 0;
+}
+
+function getLegMinFootY(side) {
   const ankle = avatarLocal.joints[`${side}Ankle`];
   const toe = avatarLocal.joints[`${side}Toe`];
   const heel = avatarLocal.joints[`${side}Heel`];
-  if (!ankle || !toe || !heel) return false;
-  return Math.min(ankle[1], toe[1], heel[1]) <= LEG_PLANT_EPS;
+  if (!ankle || !toe || !heel) return Infinity;
+  return Math.min(ankle[1], toe[1], heel[1]);
 }
 
 function updateLegPlantLock(side, controllerTargetPos = null) {
   const state = legPlant[side];
   const grounded = isLegGroundContact(side);
-  if (state.locked && controllerTargetPos && controllerTargetPos.y > LEG_RELEASE_Y) {
-    state.locked = false;
-    return false;
+  if (state.locked) {
+    if (controllerTargetPos && controllerTargetPos.y > LEG_RELEASE_Y) {
+      state.locked = false;
+      return false;
+    }
+    // Stay locked until explicit release condition is met.
+    return true;
   }
   if (grounded && !state.locked) {
     state.ankle.fromArray(avatarLocal.joints[`${side}Ankle`]);
     state.toe.fromArray(avatarLocal.joints[`${side}Toe`]);
     state.heel.fromArray(avatarLocal.joints[`${side}Heel`]);
     state.locked = true;
-  } else if (!grounded && state.locked) {
-    state.locked = false;
   }
-  return grounded;
+  return state.locked;
 }
 
-function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos) {
+function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = null) {
   const thigh = avatarLocal.edgeLenByJoints(`${side}Hip`, `${side}Knee`);
   const shin = avatarLocal.edgeLenByJoints(`${side}Knee`, `${side}Ankle`);
   const h = hipTarget.clone();
@@ -1018,7 +1041,8 @@ function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos) {
   const mid = h.clone().addScaledVector(dir, (d * d + thigh * thigh - shin * shin) / (2 * d));
   const hOff = Math.sqrt(Math.max(0, thigh * thigh - h.distanceToSquared(mid)));
 
-  let pole = controllerPos.clone().sub(mid);
+  const prevKnee = getJointVec(`${side}Knee`);
+  let pole = (controllerPos ? controllerPos.clone() : prevKnee).sub(mid);
   pole.addScaledVector(dir, -pole.dot(dir));
   if (pole.lengthSq() < 1e-8) {
     pole.set(side === 'Left' ? -1 : 1, 0, 0);
@@ -1031,25 +1055,31 @@ function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos) {
   return knee;
 }
 
+function solveGroundedLegFromCore(side, coreTarget, ankleTarget) {
+  const coreToHipLen = avatarLocal.edgeLenByJoints('Core', `${side}Hip`);
+  let hipDir = getJointVec(`${side}Hip`).sub(coreTarget);
+  if (hipDir.lengthSq() < 1e-8) hipDir.set(side === 'Left' ? -1 : 1, -0.2, 0);
+  hipDir.normalize();
+  const hipTarget = coreTarget.clone().addScaledVector(hipDir, coreToHipLen);
+  const kneeTarget = solveKneeFromHipAnkle(side, hipTarget, ankleTarget, null);
+  return { hipTarget, kneeTarget };
+}
+
 function snapLocalAvatarFeetToGround() {
-  const footJoints = ['LeftToe', 'RightToe', 'LeftHeel', 'RightHeel', 'LeftAnkle', 'RightAnkle'];
-  const lowerBodyJoints = [
-    'LeftHip', 'LeftKnee', 'LeftAnkle', 'LeftToe', 'LeftHeel',
-    'RightHip', 'RightKnee', 'RightAnkle', 'RightToe', 'RightHeel'
-  ];
-  let minY = Infinity;
-  for (const j of footJoints) {
-    const p = avatarLocal.joints[j];
-    if (!p) continue;
-    if (p[1] < minY) minY = p[1];
+  const leftFoot = ['LeftToe', 'LeftHeel', 'LeftAnkle'];
+  const rightFoot = ['RightToe', 'RightHeel', 'RightAnkle'];
+  const leftChain = ['LeftHip', 'LeftKnee', 'LeftAnkle', 'LeftToe', 'LeftHeel'];
+  const rightChain = ['RightHip', 'RightKnee', 'RightAnkle', 'RightToe', 'RightHeel'];
+
+  const leftMinY = getLegMinFootY('Left');
+  const rightMinY = getLegMinFootY('Right');
+
+  // Disabled "above 0 pull-down" logic: only correct below-floor per leg.
+  if (!legPlant.Left.locked && Number.isFinite(leftMinY) && leftMinY < 0) {
+    for (const j of leftChain) avatarLocal.joints[j][1] -= leftMinY;
   }
-  if (!Number.isFinite(minY)) return;
-  // Disabled: if feet are above floor (minY > 0), do not pull body down.
-  // if (minY > 0) { ... } behavior intentionally commented out.
-  if (minY > 0) return;
-  if (Math.abs(minY) < 1e-5) return;
-  for (const j of lowerBodyJoints) {
-    avatarLocal.joints[j][1] -= minY;
+  if (!legPlant.Right.locked && Number.isFinite(rightMinY) && rightMinY < 0) {
+    for (const j of rightChain) avatarLocal.joints[j][1] -= rightMinY;
   }
 }
 
@@ -1194,11 +1224,14 @@ const MAX_SUBSTEP_TRAVEL = 0.03;
 const MAX_SOLVER_SUBSTEPS = 5;
 const IMPACT_COOLDOWN_MS = 70;
 let lastImpactAt = 0;
-const LEG_PLANT_EPS = 0.002;
 const LEG_RELEASE_Y = 0.07;
 const legPlant = {
   Left: { locked: false, ankle: new THREE.Vector3(), toe: new THREE.Vector3(), heel: new THREE.Vector3() },
   Right: { locked: false, ankle: new THREE.Vector3(), toe: new THREE.Vector3(), heel: new THREE.Vector3() }
+};
+const coreGroundConstraint = {
+  active: false,
+  pos: new THREE.Vector3()
 };
 
 function invMass(ch, jointName, forCollision = false) {
@@ -1481,6 +1514,7 @@ renderer.xr.addEventListener('sessionstart', () => {
   xrState.lockedRightKneeNode = null;
   legPlant.Left.locked = false;
   legPlant.Right.locked = false;
+  coreGroundConstraint.active = false;
   refreshXRControllerList();
   refreshXRHands();
   const session = renderer.xr.getSession();
@@ -1504,6 +1538,7 @@ renderer.xr.addEventListener('sessionend', () => {
   xrState.lockedRightKneeNode = null;
   legPlant.Left.locked = false;
   legPlant.Right.locked = false;
+  coreGroundConstraint.active = false;
   refreshXRControllerList();
   refreshXRHands();
   statusEl.textContent = 'Exited VR';
