@@ -249,17 +249,17 @@ function placeAvatarInFrontForCalibration(head, forwardXZ) {
   }
 }
 
-function getCalibrationFacingDirectionXZ(headForwardXZ, headPos, rightHandCtrl) {
+function getCalibrationFacingDirectionXZ(headForwardXZ, headPos, leftHandCtrl) {
   const facing = headForwardXZ.clone();
-  const rightCtrlPos = getControllerLocalPos(rightHandCtrl);
-  if (!rightCtrlPos) return facing;
+  const leftCtrlPos = getControllerLocalPos(leftHandCtrl);
+  if (!leftCtrlPos) return facing;
 
-  const rightDir = rightCtrlPos.sub(headPos);
-  rightDir.y = 0;
-  if (rightDir.lengthSq() < 1e-6) return facing;
-  rightDir.normalize();
+  const leftDir = leftCtrlPos.sub(headPos);
+  leftDir.y = 0;
+  if (leftDir.lengthSq() < 1e-6) return facing;
+  leftDir.normalize();
 
-  facing.add(rightDir);
+  facing.add(leftDir);
   if (facing.lengthSq() < 1e-6) return headForwardXZ.clone();
   return facing.normalize();
 }
@@ -267,12 +267,14 @@ function getCalibrationFacingDirectionXZ(headForwardXZ, headPos, rightHandCtrl) 
 function getGazeCalibratorTargetPos() {
   const localCore = getJointVec('Core');
   const remoteCore = new THREE.Vector3().fromArray(avatarRemote.joints.Core);
-  const localHead = getJointVec('Head');
-  const remoteHead = new THREE.Vector3().fromArray(avatarRemote.joints.Head);
+  const localLeftKnee = getJointVec('LeftKnee');
+  const localRightKnee = getJointVec('RightKnee');
+  const remoteLeftKnee = new THREE.Vector3().fromArray(avatarRemote.joints.LeftKnee);
+  const remoteRightKnee = new THREE.Vector3().fromArray(avatarRemote.joints.RightKnee);
 
   const mid = localCore.clone().add(remoteCore).multiplyScalar(0.5);
-  const topY = Math.max(localHead.y, remoteHead.y);
-  mid.y = topY + GAZE_CALIB_ABOVE_MID_Y;
+  const kneeY = (localLeftKnee.y + localRightKnee.y + remoteLeftKnee.y + remoteRightKnee.y) * 0.25;
+  mid.y = kneeY;
   return mid;
 }
 
@@ -1005,7 +1007,7 @@ function applyTrackingToLocalAvatar() {
   forwardXZ.y = 0;
   if (forwardXZ.lengthSq() < 1e-6) forwardXZ.set(0, 0, 1);
   forwardXZ.normalize();
-  const calibrationFacingXZ = getCalibrationFacingDirectionXZ(forwardXZ, head, dev.rightHandCtrl);
+  const calibrationFacingXZ = getCalibrationFacingDirectionXZ(forwardXZ, head, dev.leftHandCtrl);
   let coreTarget = head.clone().add(calibr.waistOffset);
   const headFromCore = head.clone().sub(coreTarget);
   if (headFromCore.lengthSq() < 1e-8) headFromCore.set(0, 1, 0);
@@ -1037,8 +1039,6 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
     return;
   }
 
-  setPinned('Core', coreTarget, 1);
-
   const activeLeftKneeCtrl = calibr.valid ? (xrState.lockedLeftKneeNode || dev.leftKneeCtrl) : dev.leftKneeCtrl;
   const activeRightKneeCtrl = calibr.valid ? (xrState.lockedRightKneeNode || dev.rightKneeCtrl) : dev.rightKneeCtrl;
   const leftKneeCtrlPos = getControllerLocalPos(activeLeftKneeCtrl);
@@ -1051,21 +1051,56 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
   }
   const leftCtrlAdjusted = leftKneeCtrlPos ? leftKneeCtrlPos.clone().add(calibr.leftKneeOffset) : null;
   const rightCtrlAdjusted = rightKneeCtrlPos ? rightKneeCtrlPos.clone().add(calibr.rightKneeOffset) : null;
-  let leftGrounded = updateLegPlantLock('Left', leftCtrlAdjusted);
-  let rightGrounded = updateLegPlantLock('Right', rightCtrlAdjusted);
+  const qL = getControllerLocalQuat(activeLeftKneeCtrl);
+  const qR = getControllerLocalQuat(activeRightKneeCtrl);
+  let leftGrounded = false;
+  let rightGrounded = false;
+  let supportSide = null;
+  if (leftCtrlAdjusted && rightCtrlAdjusted) {
+    supportSide = leftCtrlAdjusted.y <= rightCtrlAdjusted.y ? 'Left' : 'Right';
+  } else if (leftCtrlAdjusted) {
+    supportSide = 'Left';
+  } else if (rightCtrlAdjusted) {
+    supportSide = 'Right';
+  }
 
-  // Keep at least one planted leg support in calibrated mode.
-  if (!leftGrounded && !rightGrounded) {
-    const leftY = getLegMinFootY('Left');
-    const rightY = getLegMinFootY('Right');
-    if (leftY <= rightY) {
-      lockLegAtCurrentPose('Left');
-      leftGrounded = true;
-    } else {
-      lockLegAtCurrentPose('Right');
-      rightGrounded = true;
+  let bodyDrop = 0;
+  if (supportSide) {
+    const supportFootY = getLegMinFootY(supportSide);
+    if (Number.isFinite(supportFootY) && supportFootY > LOCK_FOOT_CONTACT_Y) {
+      bodyDrop = supportFootY - LOCK_FOOT_CONTACT_Y;
     }
   }
+  if (bodyDrop > 0) {
+    const delta = new THREE.Vector3(0, -bodyDrop, 0);
+    translateLocalAvatar(delta);
+    coreTarget.add(delta);
+    neckTarget.add(delta);
+  }
+
+  if (supportSide === 'Left') {
+    if (isFootDownForLock('Left')) {
+      if (!legPlant.Left.locked) lockLegAtCurrentPose('Left');
+      legPlant.Right.locked = false;
+      leftGrounded = true;
+    } else {
+      legPlant.Left.locked = false;
+      leftGrounded = false;
+    }
+  } else if (supportSide === 'Right') {
+    if (isFootDownForLock('Right')) {
+      if (!legPlant.Right.locked) lockLegAtCurrentPose('Right');
+      legPlant.Left.locked = false;
+      rightGrounded = true;
+    } else {
+      legPlant.Right.locked = false;
+      rightGrounded = false;
+    }
+  } else {
+    legPlant.Left.locked = false;
+    legPlant.Right.locked = false;
+  }
+  setPinned('Core', coreTarget, 1);
   coreGroundConstraint.active = false;
 
   if (leftGrounded && legPlant.Left.locked) {
@@ -1101,8 +1136,6 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
       setPinned('RightKnee', rightKneeTarget, HIP_KNEE_PIN_SMOOTH);
   }
 
-  const qL = getControllerLocalQuat(activeLeftKneeCtrl);
-  const qR = getControllerLocalQuat(activeRightKneeCtrl);
   if (qL && !legPlant.Left.locked) {
     const delta = qL.clone().multiply(calibr.leftKneeRotRef.clone().invert()).normalize();
     avatarLocal.rot.LeftKnee.copy(delta.multiply(calibr.leftAnkleDirRef));
@@ -1177,6 +1210,43 @@ function lockLegAtCurrentPose(side) {
   state.toe.fromArray(avatarLocal.joints[`${side}Toe`]);
   state.heel.fromArray(avatarLocal.joints[`${side}Heel`]);
   state.locked = true;
+}
+
+function wrappedDeg(d) {
+  let a = ((d % 360) + 360) % 360;
+  if (a > 180) a -= 360;
+  return a;
+}
+
+function shouldReleasePlantedLeg(side, controllerTargetPos = null, controllerQuat = null) {
+  if (!legPlant[side]?.locked) return false;
+  if (controllerTargetPos && controllerTargetPos.y > LEG_RELEASE_Y) return true;
+
+  if (controllerTargetPos) {
+    const ctrlToLockedAnkle = controllerTargetPos.distanceTo(legPlant[side].ankle);
+    if (ctrlToLockedAnkle > PLANTED_RELEASE_CTRL_DIST) return true;
+  }
+
+  if (controllerQuat && calibr.valid) {
+    const ref = side === 'Left' ? calibr.leftKneeRotRef : calibr.rightKneeRotRef;
+    const delta = controllerQuat.clone().multiply(ref.clone().invert()).normalize();
+    const e = new THREE.Euler().setFromQuaternion(delta, 'YXZ');
+    const pitchDeg = Math.abs(wrappedDeg(THREE.MathUtils.radToDeg(e.x)));
+    const rollDeg = Math.abs(wrappedDeg(THREE.MathUtils.radToDeg(e.z)));
+    if (pitchDeg > PLANTED_RELEASE_ROT_DEG || rollDeg > PLANTED_RELEASE_ROT_DEG) return true;
+  }
+
+  return false;
+}
+
+function canSwitchSupportTo(side) {
+  const y = getLegMinFootY(side);
+  return Number.isFinite(y) && y <= SWITCH_TARGET_MAX_FOOT_Y;
+}
+
+function isFootDownForLock(side) {
+  const y = getLegMinFootY(side);
+  return Number.isFinite(y) && y <= LOCK_FOOT_CONTACT_Y;
 }
 
 function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = null) {
@@ -1442,8 +1512,12 @@ const IMPACT_COOLDOWN_MS = 70;
 let lastImpactAt = 0;
 const LEG_RELEASE_Y = 0.07;
 const FLOOR_CONTACT_EPS = 0.001;
+const LOCK_FOOT_CONTACT_Y = 0.015;
 const HIP_KNEE_PIN_SMOOTH = 0.32;
 const FREE_LEG_DIR_BLEND = 0.55;
+const PLANTED_RELEASE_ROT_DEG = 22;
+const PLANTED_RELEASE_CTRL_DIST = 0.22;
+const SWITCH_TARGET_MAX_FOOT_Y = 0.08;
 const legPlant = {
   Left: { locked: false, ankle: new THREE.Vector3(), toe: new THREE.Vector3(), heel: new THREE.Vector3() },
   Right: { locked: false, ankle: new THREE.Vector3(), toe: new THREE.Vector3(), heel: new THREE.Vector3() }
@@ -1872,7 +1946,7 @@ function step(dt) {
     solveDistance(avatarRemote, 1);
   }
   stabilizeLocalNeckSpring();
-  snapLocalAvatarFeetToGround();
+  // snapLocalAvatarFeetToGround();
   for (let i = 0; i < 2; i++) {
     solveDistance(avatarLocal, 1);
     solveDistance(avatarRemote, 1);
