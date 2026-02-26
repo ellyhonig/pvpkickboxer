@@ -518,7 +518,11 @@ const calibr = {
   leftToeLocal: new THREE.Vector3(),
   leftHeelLocal: new THREE.Vector3(),
   rightToeLocal: new THREE.Vector3(),
-  rightHeelLocal: new THREE.Vector3()
+  rightHeelLocal: new THREE.Vector3(),
+  leftThighRef: new THREE.Vector3(),
+  rightThighRef: new THREE.Vector3(),
+  leftKneeAxisRef: new THREE.Vector3(),
+  rightKneeAxisRef: new THREE.Vector3()
 };
 const calibrationPoseHold = {
   active: false,
@@ -587,7 +591,11 @@ function saveCalibration() {
     leftToeLocal: calibr.leftToeLocal.toArray(),
     leftHeelLocal: calibr.leftHeelLocal.toArray(),
     rightToeLocal: calibr.rightToeLocal.toArray(),
-    rightHeelLocal: calibr.rightHeelLocal.toArray()
+    rightHeelLocal: calibr.rightHeelLocal.toArray(),
+    leftThighRef: calibr.leftThighRef.toArray(),
+    rightThighRef: calibr.rightThighRef.toArray(),
+    leftKneeAxisRef: calibr.leftKneeAxisRef.toArray(),
+    rightKneeAxisRef: calibr.rightKneeAxisRef.toArray()
   }));
 }
 
@@ -608,6 +616,10 @@ function loadCalibration() {
     calibr.leftHeelLocal.fromArray(d.leftHeelLocal || [0, 0, 0]);
     calibr.rightToeLocal.fromArray(d.rightToeLocal || [0, 0, 0]);
     calibr.rightHeelLocal.fromArray(d.rightHeelLocal || [0, 0, 0]);
+    calibr.leftThighRef.fromArray(d.leftThighRef || [0, 0, 0]);
+    calibr.rightThighRef.fromArray(d.rightThighRef || [0, 0, 0]);
+    calibr.leftKneeAxisRef.fromArray(d.leftKneeAxisRef || [0, 0, 0]);
+    calibr.rightKneeAxisRef.fromArray(d.rightKneeAxisRef || [0, 0, 0]);
   } catch (_) {
     calibr.valid = false;
   }
@@ -942,6 +954,74 @@ function captureRigidFootReference() {
   calibr.rightHeelLocal.copy(getJointVec('RightHeel').sub(ra).applyQuaternion(calibr.rightAnkleDirRef.clone().invert()));
 }
 
+function signedAngleAroundAxis(fromDir, toDir, axis) {
+  const cross = new THREE.Vector3().crossVectors(fromDir, toDir);
+  return Math.atan2(axis.dot(cross), fromDir.dot(toDir));
+}
+
+function captureKneeHyperextensionReferences() {
+  const captureSide = (side) => {
+    const hip = getJointVec(`${side}Hip`);
+    const knee = getJointVec(`${side}Knee`);
+    const ankle = getJointVec(`${side}Ankle`);
+    const toe = getJointVec(`${side}Toe`);
+    const heel = getJointVec(`${side}Heel`);
+
+    const thigh = hip.sub(knee);
+    if (thigh.lengthSq() < 1e-8) thigh.set(0, 1, 0);
+    thigh.normalize();
+
+    const shin = ankle.sub(getJointVec(`${side}Knee`));
+    if (shin.lengthSq() < 1e-8) shin.copy(thigh).multiplyScalar(-1);
+    shin.normalize();
+
+    const toeDir = toe.sub(heel);
+    if (toeDir.lengthSq() < 1e-8) toeDir.copy(shin);
+    toeDir.normalize();
+
+    const extDir = thigh.clone().multiplyScalar(-1);
+    let axis = new THREE.Vector3().crossVectors(toeDir, thigh);
+    if (axis.lengthSq() < 1e-8) axis = new THREE.Vector3().crossVectors(extDir, shin);
+    if (axis.lengthSq() < 1e-8) axis.set(side === 'Left' ? -1 : 1, 0, 0);
+    axis.normalize();
+
+    const signed = signedAngleAroundAxis(extDir, shin, axis);
+    if (signed < 0) axis.multiplyScalar(-1);
+
+    if (side === 'Left') {
+      calibr.leftThighRef.copy(thigh);
+      calibr.leftKneeAxisRef.copy(axis);
+    } else {
+      calibr.rightThighRef.copy(thigh);
+      calibr.rightKneeAxisRef.copy(axis);
+    }
+  };
+
+  captureSide('Left');
+  captureSide('Right');
+}
+
+function clampFreeShinHyperextension(side, kneeRot) {
+  const thighRef = side === 'Left' ? calibr.leftThighRef : calibr.rightThighRef;
+  const axisRef = side === 'Left' ? calibr.leftKneeAxisRef : calibr.rightKneeAxisRef;
+  if (thighRef.lengthSq() < 1e-8 || axisRef.lengthSq() < 1e-8) return kneeRot;
+
+  const hip = getJointVec(`${side}Hip`);
+  const knee = getJointVec(`${side}Knee`);
+  const thigh = hip.sub(knee);
+  if (thigh.lengthSq() < 1e-8) return kneeRot;
+  thigh.normalize();
+
+  const qAlign = new THREE.Quaternion().setFromUnitVectors(thighRef.clone().normalize(), thigh);
+  const axisNow = axisRef.clone().normalize().applyQuaternion(qAlign).normalize();
+  const extDir = thigh.clone().multiplyScalar(-1);
+  const shinDir = new THREE.Vector3(0, 1, 0).applyQuaternion(kneeRot).normalize();
+  const signed = signedAngleAroundAxis(extDir, shinDir, axisNow);
+  if (signed >= -1e-3) return kneeRot;
+
+  return new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), extDir);
+}
+
 function calibrateNow() {
   if (!renderer.xr.isPresenting) {
     statusEl.textContent = 'Calibration requires active VR session';
@@ -979,6 +1059,7 @@ function calibrateNow() {
   armCalibrationPoseHold(head, leftKneeCtrlPos, rightKneeCtrlPos);
   captureAnkleDirectionReference();
   captureRigidFootReference();
+  captureKneeHyperextensionReferences();
   saveCalibration();
   statusEl.textContent = 'Calibrated: waist offset + knee controllers locked.';
 }
@@ -1001,6 +1082,10 @@ function clearCalibrationOnly() {
   calibr.leftHeelLocal.set(0, 0, 0);
   calibr.rightToeLocal.set(0, 0, 0);
   calibr.rightHeelLocal.set(0, 0, 0);
+  calibr.leftThighRef.set(0, 0, 0);
+  calibr.rightThighRef.set(0, 0, 0);
+  calibr.leftKneeAxisRef.set(0, 0, 0);
+  calibr.rightKneeAxisRef.set(0, 0, 0);
   legPlant.Left.locked = false;
   legPlant.Right.locked = false;
   coreGroundConstraint.active = false;
@@ -1231,11 +1316,13 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
 
   if (qL && !legPlant.Left.locked) {
     const delta = qL.clone().multiply(calibr.leftKneeRotRef.clone().invert()).normalize();
-    avatarLocal.rot.LeftKnee.copy(delta.multiply(calibr.leftAnkleDirRef));
+    const rawRot = delta.multiply(calibr.leftAnkleDirRef.clone());
+    avatarLocal.rot.LeftKnee.copy(clampFreeShinHyperextension('Left', rawRot));
   }
   if (qR && !legPlant.Right.locked) {
     const delta = qR.clone().multiply(calibr.rightKneeRotRef.clone().invert()).normalize();
-    avatarLocal.rot.RightKnee.copy(delta.multiply(calibr.rightAnkleDirRef));
+    const rawRot = delta.multiply(calibr.rightAnkleDirRef.clone());
+    avatarLocal.rot.RightKnee.copy(clampFreeShinHyperextension('Right', rawRot));
   }
   if (DEBUG_VIS) {
     const lCtrl = leftKneeCtrlPos ? leftKneeCtrlPos.clone().add(calibr.leftKneeOffset) : null;
@@ -1884,6 +1971,10 @@ resetBtn.addEventListener('click', () => {
   calibr.leftHeelLocal.set(0, 0, 0);
   calibr.rightToeLocal.set(0, 0, 0);
   calibr.rightHeelLocal.set(0, 0, 0);
+  calibr.leftThighRef.set(0, 0, 0);
+  calibr.rightThighRef.set(0, 0, 0);
+  calibr.leftKneeAxisRef.set(0, 0, 0);
+  calibr.rightKneeAxisRef.set(0, 0, 0);
   xrState.lockedLeftKneeSource = null;
   xrState.lockedRightKneeSource = null;
   xrState.lockedLeftKneeNode = null;
