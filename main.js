@@ -1319,12 +1319,14 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
   coreGroundConstraint.active = false;
 
   if (leftGrounded && legPlant.Left.locked) {
-    const solved = solveGroundedLegFromCore('Left', coreTarget, legPlant.Left.ankle, leftCtrlAdjusted);
+    const foot = solveLockedFootFromToe('Left', legPlant.Left.toe, qL);
+    avatarLocal.rot.LeftKnee.copy(foot.footRot);
+    const solved = solveGroundedLegFromCore('Left', coreTarget, foot.ankle, leftCtrlAdjusted);
     leftHipTarget = solved.hipTarget;
     leftKneeTarget = solved.kneeTarget;
-    setPinned('LeftAnkle', legPlant.Left.ankle, 1);
-    setPinned('LeftToe', legPlant.Left.toe, 1);
-    setPinned('LeftHeel', legPlant.Left.heel, 1);
+    setPinned('LeftAnkle', foot.ankle, 1);
+    setPinned('LeftToe', foot.toe, 1);
+    setPinned('LeftHeel', foot.heel, 1);
     setPinned('LeftHip', leftHipTarget, HIP_KNEE_PIN_SMOOTH);
     setPinned('LeftKnee', leftKneeTarget, HIP_KNEE_PIN_SMOOTH);
   } else if (leftKneeCtrlPos) {
@@ -1335,12 +1337,14 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
       setPinned('LeftKnee', leftKneeTarget, HIP_KNEE_PIN_SMOOTH);
   }
   if (rightGrounded && legPlant.Right.locked) {
-    const solved = solveGroundedLegFromCore('Right', coreTarget, legPlant.Right.ankle, rightCtrlAdjusted);
+    const foot = solveLockedFootFromToe('Right', legPlant.Right.toe, qR);
+    avatarLocal.rot.RightKnee.copy(foot.footRot);
+    const solved = solveGroundedLegFromCore('Right', coreTarget, foot.ankle, rightCtrlAdjusted);
     rightHipTarget = solved.hipTarget;
     rightKneeTarget = solved.kneeTarget;
-    setPinned('RightAnkle', legPlant.Right.ankle, 1);
-    setPinned('RightToe', legPlant.Right.toe, 1);
-    setPinned('RightHeel', legPlant.Right.heel, 1);
+    setPinned('RightAnkle', foot.ankle, 1);
+    setPinned('RightToe', foot.toe, 1);
+    setPinned('RightHeel', foot.heel, 1);
     setPinned('RightHip', rightHipTarget, HIP_KNEE_PIN_SMOOTH);
     setPinned('RightKnee', rightKneeTarget, HIP_KNEE_PIN_SMOOTH);
   } else if (rightKneeCtrlPos) {
@@ -1464,6 +1468,28 @@ function canSwitchSupportTo(side) {
 function isFootDownForLock(side) {
   const y = getLegMinFootY(side);
   return Number.isFinite(y) && y <= LOCK_FOOT_CONTACT_Y;
+}
+
+function solveLockedFootFromToe(side, toeAnchor, controllerQuat = null) {
+  let footRot = avatarLocal.rot[`${side}Knee`].clone();
+  if (controllerQuat && calibr.valid) {
+    if (side === 'Left') {
+      const delta = controllerQuat.clone().multiply(calibr.leftKneeRotRef.clone().invert()).normalize();
+      footRot = delta.multiply(calibr.leftAnkleDirRef.clone()).normalize();
+    } else {
+      const delta = controllerQuat.clone().multiply(calibr.rightKneeRotRef.clone().invert()).normalize();
+      footRot = delta.multiply(calibr.rightAnkleDirRef.clone()).normalize();
+    }
+  }
+
+  const toeLocal = side === 'Left' ? calibr.leftToeLocal : calibr.rightToeLocal;
+  const heelLocal = side === 'Left' ? calibr.leftHeelLocal : calibr.rightHeelLocal;
+  const toeFromAnkle = toeLocal.clone().applyQuaternion(footRot);
+  const heelFromAnkle = heelLocal.clone().applyQuaternion(footRot);
+  const ankle = toeAnchor.clone().sub(toeFromAnkle);
+  const heel = ankle.clone().add(heelFromAnkle);
+
+  return { ankle, toe: toeAnchor.clone(), heel, footRot };
 }
 
 function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = null) {
