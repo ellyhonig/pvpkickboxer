@@ -161,23 +161,28 @@ const controllerFloorCalib = {
 };
 
 function updateFloorFromControllerLow(leftPos, rightPos) {
-  const ys = [];
-  if (leftPos) ys.push(leftPos.y);
-  if (rightPos) ys.push(rightPos.y);
-  if (ys.length === 0) return false;
+  let lowPos = null;
+  if (leftPos && rightPos) lowPos = leftPos.y <= rightPos.y ? leftPos : rightPos;
+  else if (leftPos) lowPos = leftPos;
+  else if (rightPos) lowPos = rightPos;
+  if (!lowPos) return false;
 
-  const currentMin = Math.min(...ys);
+  const currentMin = lowPos.y;
   if (!Number.isFinite(currentMin)) return false;
 
   if (!Number.isFinite(controllerFloorCalib.minY)) {
+    world.position.x -= lowPos.x;
     world.position.y += currentMin;
+    world.position.z -= lowPos.z;
     controllerFloorCalib.minY = 0;
     return true;
   }
 
   if (currentMin < controllerFloorCalib.minY) {
-    // Shift whole XR world so the new lowest controller point becomes floor level (y=0).
+    // Shift whole XR world so lowest controller is floor-level and centered in XZ.
+    world.position.x -= lowPos.x;
     world.position.y += currentMin;
+    world.position.z -= lowPos.z;
     controllerFloorCalib.minY = 0;
     return true;
   }
