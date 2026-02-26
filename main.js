@@ -69,7 +69,8 @@ const CALIB_STORAGE_KEY = 'pvpkickboxer_calib_v2';
 const GAZE_CALIB_DWELL_MS = 1000;
 const GAZE_CALIB_COOLDOWN_MS = 800;
 const GAZE_CALIB_ANGLE_DEG = 8;
-const GAZE_CALIB_ABOVE_MID_Y = 0.45;
+const CALIB_MARKER_LOW_ABOVE_OPP_HEAD_Y = 0.16;
+const CALIB_MARKER_HIGH_DELTA_Y = 0.34;
 const ESTIMATED_EYE_HEIGHT_M = 1.65;
 const CALIB_POSE_HOLD_HEAD_EPS = 0.02;
 const CALIB_POSE_HOLD_CTRL_EPS = 0.03;
@@ -77,6 +78,7 @@ const CALIB_PREVIEW_DISTANCE = 1.05;
 const AVATAR_SCALE = 0.92;
 const BASE_BONE_RADIUS = 0.019;
 const TORSO_RADIUS_MULT = 5;
+const FLOOR_SIZE_M = 3.048; // 10 feet
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -130,7 +132,7 @@ dir.position.set(3, 5, 2);
 world.add(dir);
 const grid = new THREE.GridHelper(10, 20, 0x2c4556, 0x1a2a36);
 world.add(grid);
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.MeshStandardMaterial({ color: 0x0b1117, roughness: 1 }));
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(FLOOR_SIZE_M, FLOOR_SIZE_M), new THREE.MeshStandardMaterial({ color: 0x0b1117, roughness: 1 }));
 floor.rotation.x = -Math.PI / 2;
 world.add(floor);
 
@@ -189,7 +191,9 @@ const gazeCalib = {
   progress: 0,
   marker: null,
   fillMesh: null,
-  coreMesh: null
+  coreMesh: null,
+  basePos: new THREE.Vector3(),
+  hasBasePos: false
 };
 
 function buildGazeCalibratorMarker() {
@@ -325,6 +329,12 @@ function placeAvatarInFrontForCalibration(head, forwardXZ) {
   }
 }
 
+function resetCalibratorBasePosFromOpponentHead() {
+  const remoteHead = new THREE.Vector3().fromArray(avatarRemote.joints.Head);
+  gazeCalib.basePos.set(remoteHead.x, remoteHead.y + CALIB_MARKER_LOW_ABOVE_OPP_HEAD_Y, remoteHead.z);
+  gazeCalib.hasBasePos = true;
+}
+
 function getCalibrationFacingDirectionXZ(headForwardXZ, headPos, leftHandCtrl) {
   const facing = headForwardXZ.clone();
   const leftCtrlPos = getControllerLocalPos(leftHandCtrl);
@@ -341,17 +351,10 @@ function getCalibrationFacingDirectionXZ(headForwardXZ, headPos, leftHandCtrl) {
 }
 
 function getGazeCalibratorTargetPos() {
-  const localCore = getJointVec('Core');
-  const remoteCore = new THREE.Vector3().fromArray(avatarRemote.joints.Core);
-  const localLeftKnee = getJointVec('LeftKnee');
-  const localRightKnee = getJointVec('RightKnee');
-  const remoteLeftKnee = new THREE.Vector3().fromArray(avatarRemote.joints.LeftKnee);
-  const remoteRightKnee = new THREE.Vector3().fromArray(avatarRemote.joints.RightKnee);
-
-  const mid = localCore.clone().add(remoteCore).multiplyScalar(0.5);
-  const kneeY = (localLeftKnee.y + localRightKnee.y + remoteLeftKnee.y + remoteRightKnee.y) * 0.25;
-  mid.y = kneeY;
-  return mid;
+  if (!gazeCalib.hasBasePos) resetCalibratorBasePosFromOpponentHead();
+  const target = gazeCalib.basePos.clone();
+  if (calibr.valid) target.y += CALIB_MARKER_HIGH_DELTA_Y;
+  return target;
 }
 
 function hmdLocalForward() {
@@ -978,6 +981,7 @@ function calibrateNow() {
 function clearCalibrationOnly() {
   if (startPose) avatarLocal.restore(startPose);
   if (remoteStartPose) avatarRemote.restore(remoteStartPose);
+  resetCalibratorBasePosFromOpponentHead();
   clearCalibrationPoseHold();
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
@@ -1860,6 +1864,7 @@ function poseCentering() {
 resetBtn.addEventListener('click', () => {
   if (startPose) avatarLocal.restore(startPose);
   if (remoteStartPose) avatarRemote.restore(remoteStartPose);
+  resetCalibratorBasePosFromOpponentHead();
   clearCalibrationPoseHold();
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
@@ -1974,6 +1979,7 @@ async function loadData() {
   avatarRemote.setPose(p.position[1]);
   scaleCharacter(avatarLocal, AVATAR_SCALE);
   scaleCharacter(avatarRemote, AVATAR_SCALE);
+  resetCalibratorBasePosFromOpponentHead();
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
   startPose = avatarLocal.snapshot();
