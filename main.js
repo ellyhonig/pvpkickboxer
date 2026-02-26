@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { ARButton } from 'three/addons/webxr/ARButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 
@@ -69,6 +70,7 @@ const GAZE_CALIB_DWELL_MS = 1000;
 const GAZE_CALIB_COOLDOWN_MS = 800;
 const GAZE_CALIB_ANGLE_DEG = 8;
 const GAZE_CALIB_ABOVE_MID_Y = 0.45;
+const ESTIMATED_EYE_HEIGHT_M = 1.65;
 const CALIB_POSE_HOLD_HEAD_EPS = 0.02;
 const CALIB_POSE_HOLD_CTRL_EPS = 0.03;
 const CALIB_PREVIEW_DISTANCE = 1.05;
@@ -81,15 +83,40 @@ renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000, 0);
 renderer.xr.enabled = true;
-document.body.appendChild(VRButton.createButton(renderer, {
-  requiredFeatures: ['hand-tracking'],
-  optionalFeatures: ['local-floor', 'bounded-floor', 'passthrough']
-}));
+
+function installXRSessionButton() {
+  const arInit = {
+    requiredFeatures: ['local-floor'],
+    optionalFeatures: ['hand-tracking', 'bounded-floor', 'passthrough', 'dom-overlay'],
+    domOverlay: { root: document.body }
+  };
+  const vrInit = {
+    requiredFeatures: ['local-floor', 'hand-tracking'],
+    optionalFeatures: ['bounded-floor', 'passthrough']
+  };
+
+  if (!navigator.xr || !navigator.xr.isSessionSupported) {
+    document.body.appendChild(VRButton.createButton(renderer, vrInit));
+    return;
+  }
+
+  navigator.xr.isSessionSupported('immersive-ar')
+    .then((supported) => {
+      if (supported) document.body.appendChild(ARButton.createButton(renderer, arInit));
+      else document.body.appendChild(VRButton.createButton(renderer, vrInit));
+    })
+    .catch(() => {
+      document.body.appendChild(VRButton.createButton(renderer, vrInit));
+    });
+}
+
+installXRSessionButton();
 
 const scene = new THREE.Scene();
 scene.fog = null;
 const world = new THREE.Group();
 scene.add(world);
+let pendingFloorAlign = false;
 
 const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.01, 100);
 camera.position.set(2.4, 1.7, 2.4);
@@ -106,6 +133,55 @@ world.add(grid);
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.MeshStandardMaterial({ color: 0x0b1117, roughness: 1 }));
 floor.rotation.x = -Math.PI / 2;
 world.add(floor);
+
+function alignWorldFloorForSession(session) {
+  if (!session) return;
+  const xrCam = renderer.xr.getCamera(camera);
+  const headWorld = new THREE.Vector3();
+  xrCam.getWorldPosition(headWorld);
+
+  if (session.mode === 'immersive-ar') {
+    const enabled = session.enabledFeatures ? Array.from(session.enabledFeatures) : [];
+    const hasLocalFloor = enabled.includes('local-floor');
+    if (hasLocalFloor) {
+      world.position.y = 0;
+    } else {
+      // Fallback: approximate floor from eye height when local-floor isn't available.
+      world.position.y = headWorld.y - ESTIMATED_EYE_HEIGHT_M;
+    }
+  } else {
+    world.position.y = 0;
+  }
+}
+
+const controllerFloorCalib = {
+  minY: Infinity
+};
+
+function updateFloorFromControllerLow(leftPos, rightPos) {
+  const ys = [];
+  if (leftPos) ys.push(leftPos.y);
+  if (rightPos) ys.push(rightPos.y);
+  if (ys.length === 0) return false;
+
+  const currentMin = Math.min(...ys);
+  if (!Number.isFinite(currentMin)) return false;
+
+  if (!Number.isFinite(controllerFloorCalib.minY)) {
+    world.position.y += currentMin;
+    controllerFloorCalib.minY = 0;
+    return true;
+  }
+
+  if (currentMin < controllerFloorCalib.minY) {
+    // Shift whole XR world so the new lowest controller point becomes floor level (y=0).
+    world.position.y += currentMin;
+    controllerFloorCalib.minY = 0;
+    return true;
+  }
+
+  return false;
+}
 
 const gazeCalib = {
   activeSince: 0,
@@ -1002,6 +1078,14 @@ function applyTrackingToLocalAvatar() {
   if (!renderer.xr.isPresenting) return;
 
   const dev = classifyControllersByBody(forceTrackers);
+  if (!calibr.valid) {
+    const leftPreCalibCtrl = getControllerLocalPos(dev.leftKneeCtrl);
+    const rightPreCalibCtrl = getControllerLocalPos(dev.rightKneeCtrl);
+    if (updateFloorFromControllerLow(leftPreCalibCtrl, rightPreCalibCtrl)) {
+      // World moved; sample once more in the new local frame.
+      updateFloorFromControllerLow(getControllerLocalPos(dev.leftKneeCtrl), getControllerLocalPos(dev.rightKneeCtrl));
+    }
+  }
   const head = hmdLocalPos();
   const forwardXZ = hmdLocalForward();
   forwardXZ.y = 0;
@@ -1809,6 +1893,8 @@ renderer.xr.addEventListener('sessionstart', () => {
   legPlant.Right.locked = false;
   coreGroundConstraint.active = false;
   clearCalibrationPoseHold();
+  controllerFloorCalib.minY = Infinity;
+  pendingFloorAlign = true;
   refreshXRControllerList();
   refreshXRHands();
   const session = renderer.xr.getSession();
@@ -1835,6 +1921,9 @@ renderer.xr.addEventListener('sessionend', () => {
   legPlant.Right.locked = false;
   coreGroundConstraint.active = false;
   clearCalibrationPoseHold();
+  controllerFloorCalib.minY = Infinity;
+  pendingFloorAlign = false;
+  world.position.y = 0;
   refreshXRControllerList();
   refreshXRHands();
   statusEl.textContent = 'Exited VR';
@@ -1894,6 +1983,10 @@ async function loadData() {
 }
 
 function step(dt) {
+  if (pendingFloorAlign && renderer.xr.isPresenting) {
+    alignWorldFloorForSession(renderer.xr.getSession());
+    pendingFloorAlign = false;
+  }
   avatarLocal.copyCurrentToPrev();
   avatarRemote.copyCurrentToPrev();
   updateGazeCalibrator();
