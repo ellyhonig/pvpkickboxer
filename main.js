@@ -171,18 +171,14 @@ function updateFloorFromControllerLow(leftPos, rightPos) {
   if (!Number.isFinite(currentMin)) return false;
 
   if (!Number.isFinite(controllerFloorCalib.minY)) {
-    world.position.x -= lowPos.x;
     world.position.y += currentMin;
-    world.position.z -= lowPos.z;
     controllerFloorCalib.minY = 0;
     return true;
   }
 
   if (currentMin < controllerFloorCalib.minY) {
-    // Shift whole XR world so lowest controller is floor-level and centered in XZ.
-    world.position.x -= lowPos.x;
+    // Shift whole XR world so lowest controller is floor-level (y=0).
     world.position.y += currentMin;
-    world.position.z -= lowPos.z;
     controllerFloorCalib.minY = 0;
     return true;
   }
@@ -1016,10 +1012,16 @@ function clampFreeShinHyperextension(side, kneeRot) {
   const axisNow = axisRef.clone().normalize().applyQuaternion(qAlign).normalize();
   const extDir = thigh.clone().multiplyScalar(-1);
   const shinDir = new THREE.Vector3(0, 1, 0).applyQuaternion(kneeRot).normalize();
-  const signed = signedAngleAroundAxis(extDir, shinDir, axisNow);
-  if (signed >= -1e-3) return kneeRot;
 
-  return new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), extDir);
+  // Signed hinge bend where 0 = straight; negative = hyperextension.
+  const bend = signedAngleAroundAxis(extDir, shinDir, axisNow);
+  const maxBend = THREE.MathUtils.degToRad(180 - KNEE_MIN_INTERIOR_DEG);
+  const clampedBend = clamp(bend, 0, maxBend);
+  if (Math.abs(clampedBend - bend) < 1e-4) return kneeRot;
+
+  const clampedShinDir = extDir.clone().applyAxisAngle(axisNow, clampedBend).normalize();
+  const qFix = new THREE.Quaternion().setFromUnitVectors(shinDir, clampedShinDir);
+  return qFix.multiply(kneeRot.clone()).normalize();
 }
 
 function calibrateNow() {
@@ -1695,6 +1697,7 @@ const FLOOR_CONTACT_EPS = 0.001;
 const LOCK_FOOT_CONTACT_Y = 0.015;
 const HIP_KNEE_PIN_SMOOTH = 0.32;
 const FREE_LEG_DIR_BLEND = 0.55;
+const KNEE_MIN_INTERIOR_DEG = 10;
 const PLANTED_RELEASE_ROT_DEG = 22;
 const PLANTED_RELEASE_CTRL_DIST = 0.22;
 const SWITCH_TARGET_MAX_FOOT_Y = 0.08;
