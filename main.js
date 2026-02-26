@@ -528,6 +528,21 @@ const calibrationPoseHold = {
   rightCtrlRef: null
 };
 let holdLocalPoseThisFrame = false;
+const kneeHingeState = {
+  Left: { frozen: false, lastValidBend: 0, lastValidRot: new THREE.Quaternion(), hasValidRot: false },
+  Right: { frozen: false, lastValidBend: 0, lastValidRot: new THREE.Quaternion(), hasValidRot: false }
+};
+
+function resetKneeHingeState() {
+  kneeHingeState.Left.frozen = false;
+  kneeHingeState.Right.frozen = false;
+  kneeHingeState.Left.lastValidBend = 0;
+  kneeHingeState.Right.lastValidBend = 0;
+  kneeHingeState.Left.lastValidRot.identity();
+  kneeHingeState.Right.lastValidRot.identity();
+  kneeHingeState.Left.hasValidRot = false;
+  kneeHingeState.Right.hasValidRot = false;
+}
 
 function clearCalibrationPoseHold() {
   calibrationPoseHold.active = false;
@@ -956,6 +971,8 @@ function signedAngleAroundAxis(fromDir, toDir, axis) {
 }
 
 function captureKneeHyperextensionReferences() {
+  const maxBend = THREE.MathUtils.degToRad(180 - KNEE_MIN_INTERIOR_DEG);
+  const up = new THREE.Vector3(0, 1, 0);
   const captureSide = (side) => {
     const hip = getJointVec(`${side}Hip`);
     const knee = getJointVec(`${side}Knee`);
@@ -983,13 +1000,23 @@ function captureKneeHyperextensionReferences() {
 
     const signed = signedAngleAroundAxis(extDir, shin, axis);
     if (signed < 0) axis.multiplyScalar(-1);
+    const bend = Math.max(0, Math.min(maxBend, signedAngleAroundAxis(extDir, shin, axis)));
+    const kneeRotRef = new THREE.Quaternion().setFromUnitVectors(up, shin);
 
     if (side === 'Left') {
       calibr.leftThighRef.copy(thigh);
       calibr.leftKneeAxisRef.copy(axis);
+      kneeHingeState.Left.lastValidBend = bend;
+      kneeHingeState.Left.frozen = false;
+      kneeHingeState.Left.lastValidRot.copy(kneeRotRef);
+      kneeHingeState.Left.hasValidRot = true;
     } else {
       calibr.rightThighRef.copy(thigh);
       calibr.rightKneeAxisRef.copy(axis);
+      kneeHingeState.Right.lastValidBend = bend;
+      kneeHingeState.Right.frozen = false;
+      kneeHingeState.Right.lastValidRot.copy(kneeRotRef);
+      kneeHingeState.Right.hasValidRot = true;
     }
   };
 
@@ -1016,12 +1043,19 @@ function clampFreeShinHyperextension(side, kneeRot) {
   // Signed hinge bend where 0 = straight; negative = hyperextension.
   const bend = signedAngleAroundAxis(extDir, shinDir, axisNow);
   const maxBend = THREE.MathUtils.degToRad(180 - KNEE_MIN_INTERIOR_DEG);
-  const clampedBend = clamp(bend, 0, maxBend);
-  if (Math.abs(clampedBend - bend) < 1e-4) return kneeRot;
+  const state = kneeHingeState[side];
+  const valid = bend >= 0 && bend <= maxBend;
+  if (valid) {
+    state.lastValidBend = bend;
+    state.lastValidRot.copy(kneeRot);
+    state.hasValidRot = true;
+    state.frozen = false;
+    return kneeRot;
+  }
 
-  const clampedShinDir = extDir.clone().applyAxisAngle(axisNow, clampedBend).normalize();
-  const qFix = new THREE.Quaternion().setFromUnitVectors(shinDir, clampedShinDir);
-  return qFix.multiply(kneeRot.clone()).normalize();
+  state.frozen = true;
+  if (state.hasValidRot) return state.lastValidRot.clone();
+  return kneeRot;
 }
 
 function calibrateNow() {
@@ -1071,6 +1105,7 @@ function clearCalibrationOnly() {
   if (remoteStartPose) avatarRemote.restore(remoteStartPose);
   resetCalibratorBasePosFromOpponentHead();
   clearCalibrationPoseHold();
+  resetKneeHingeState();
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
   calibr.valid = false;
@@ -1961,6 +1996,7 @@ resetBtn.addEventListener('click', () => {
   if (remoteStartPose) avatarRemote.restore(remoteStartPose);
   resetCalibratorBasePosFromOpponentHead();
   clearCalibrationPoseHold();
+  resetKneeHingeState();
   const coreNow = new THREE.Vector3().fromArray(avatarLocal.joints.Core);
   calibr.waistOffset.copy(coreNow.sub(hmdLocalPos()));
   calibr.valid = false;
@@ -1997,6 +2033,7 @@ renderer.xr.addEventListener('sessionstart', () => {
   legPlant.Right.locked = false;
   coreGroundConstraint.active = false;
   clearCalibrationPoseHold();
+  resetKneeHingeState();
   controllerFloorCalib.minY = Infinity;
   pendingFloorAlign = true;
   refreshXRControllerList();
@@ -2025,6 +2062,7 @@ renderer.xr.addEventListener('sessionend', () => {
   legPlant.Right.locked = false;
   coreGroundConstraint.active = false;
   clearCalibrationPoseHold();
+  resetKneeHingeState();
   controllerFloorCalib.minY = Infinity;
   pendingFloorAlign = false;
   world.position.y = 0;
