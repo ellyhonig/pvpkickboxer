@@ -78,6 +78,7 @@ const CALIB_PREVIEW_DISTANCE = 1.05;
 const CALIB_PREVIEW_DISTANCE_MIN = 0.7;
 const CALIB_PREVIEW_DISTANCE_MAX = 1.8;
 const AVATAR_SCALE = 0.92;
+const FLOPPY_HEAD_MODE = true;
 const BASE_BONE_RADIUS = 0.019;
 const TORSO_RADIUS_MULT = 5;
 const FLOOR_SIZE_M = 3.048; // 10 feet
@@ -1767,6 +1768,7 @@ function maybeAutoCalibrateFromLookUp() {
 function applyRotationChildTargets(ch, stiff) {
   const up = new THREE.Vector3(0, 1, 0);
   for (const j of Object.keys(ROT_CHILD)) {
+    if (FLOPPY_HEAD_MODE && ch === avatarLocal && j === 'Neck') continue;
     const child = ROT_CHILD[j];
     const q = ch.rot[j];
     if (!q) continue;
@@ -1891,6 +1893,7 @@ function solveDistance(ch, stiffness = DIST_STIFF) {
 }
 
 function stabilizeLocalNeckSpring() {
+  if (FLOPPY_HEAD_MODE) return;
   const core = avatarLocal.joints.Core;
   const neck = avatarLocal.joints.Neck;
   if (!core || !neck) return;
