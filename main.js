@@ -1501,10 +1501,42 @@ function solveLockedFootFromToe(side, toeAnchor, controllerQuat = null) {
 
   const toeLocal = side === 'Left' ? calibr.leftToeLocal : calibr.rightToeLocal;
   const heelLocal = side === 'Left' ? calibr.leftHeelLocal : calibr.rightHeelLocal;
-  const toeFromAnkle = toeLocal.clone().applyQuaternion(footRot);
-  const heelFromAnkle = heelLocal.clone().applyQuaternion(footRot);
-  const ankle = toeAnchor.clone().sub(toeFromAnkle);
-  const heel = ankle.clone().add(heelFromAnkle);
+  const computeFootPoints = () => {
+    const toeFromAnkle = toeLocal.clone().applyQuaternion(footRot);
+    const heelFromAnkle = heelLocal.clone().applyQuaternion(footRot);
+    const ankle = toeAnchor.clone().sub(toeFromAnkle);
+    const heel = ankle.clone().add(heelFromAnkle);
+    return { ankle, heel };
+  };
+
+  let { ankle, heel } = computeFootPoints();
+
+  // Keep planted-toe pivot behavior, but prevent heel penetration through floor.
+  const minHeelY = FLOOR_CONTACT_EPS;
+  if (heel.y < minHeelY) {
+    const toeToHeel = heel.clone().sub(toeAnchor);
+    const len = toeToHeel.length();
+    const targetToeToHeelY = minHeelY - toeAnchor.y;
+    if (len > 1e-6 && toeToHeel.y < targetToeToHeelY - 1e-5) {
+      const axis = toeToHeel.clone().cross(new THREE.Vector3(0, 1, 0));
+      if (axis.lengthSq() > 1e-8) {
+        axis.normalize();
+        const current = Math.asin(clamp(toeToHeel.y / len, -1, 1));
+        const target = Math.asin(clamp(targetToeToHeelY / len, -1, 1));
+        const delta = Math.max(0, target - current);
+        if (delta > 1e-6) {
+          const qCorr = new THREE.Quaternion().setFromAxisAngle(axis, delta);
+          footRot.premultiply(qCorr).normalize();
+          ({ ankle, heel } = computeFootPoints());
+        }
+      }
+    }
+    if (heel.y < minHeelY) {
+      const lift = minHeelY - heel.y;
+      ankle.y += lift;
+      heel.y += lift;
+    }
+  }
 
   return { ankle, toe: toeAnchor.clone(), heel, footRot };
 }
