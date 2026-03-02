@@ -75,6 +75,8 @@ const ESTIMATED_EYE_HEIGHT_M = 1.65;
 const CALIB_POSE_HOLD_HEAD_EPS = 0.02;
 const CALIB_POSE_HOLD_CTRL_EPS = 0.03;
 const CALIB_PREVIEW_DISTANCE = 1.05;
+const CALIB_PREVIEW_DISTANCE_MIN = 0.7;
+const CALIB_PREVIEW_DISTANCE_MAX = 1.8;
 const AVATAR_SCALE = 0.92;
 const BASE_BONE_RADIUS = 0.019;
 const TORSO_RADIUS_MULT = 5;
@@ -317,9 +319,18 @@ function getAvatarForwardXZ(ch) {
   return new THREE.Vector3(0, 0, 1);
 }
 
-function placeAvatarInFrontForCalibration(head, forwardXZ) {
+function getCalibrationPreviewDistance(head, leftCtrlPos = null, rightCtrlPos = null) {
+  const dists = [];
+  if (leftCtrlPos) dists.push(head.distanceTo(leftCtrlPos));
+  if (rightCtrlPos) dists.push(head.distanceTo(rightCtrlPos));
+  if (!dists.length) return CALIB_PREVIEW_DISTANCE;
+  const avg = dists.reduce((sum, d) => sum + d, 0) / dists.length;
+  return clamp(avg, CALIB_PREVIEW_DISTANCE_MIN, CALIB_PREVIEW_DISTANCE_MAX);
+}
+
+function placeAvatarInFrontForCalibration(head, forwardXZ, previewDistance = CALIB_PREVIEW_DISTANCE) {
   const coreNow = getJointVec('Core');
-  const desiredCore = head.clone().add(forwardXZ.clone().multiplyScalar(CALIB_PREVIEW_DISTANCE));
+  const desiredCore = head.clone().add(forwardXZ.clone().multiplyScalar(previewDistance));
   desiredCore.y = coreNow.y;
 
   const currentForward = getAvatarForwardXZ(avatarLocal);
@@ -1130,6 +1141,8 @@ function clearCalibrationOnly() {
   xrState.lockedRightKneeSource = null;
   xrState.lockedLeftKneeNode = null;
   xrState.lockedRightKneeNode = null;
+  // Re-arm floor alignment so pre-calibration reuses lower-controller floor logic.
+  controllerFloorCalib.minY = Infinity;
   saveCalibration();
   statusEl.textContent = 'Calibration cleared.';
 }
@@ -1209,9 +1222,11 @@ function applyTrackingToLocalAvatar() {
   if (!renderer.xr.isPresenting) return;
 
   const dev = classifyControllersByBody(forceTrackers);
+  let leftPreCalibCtrl = null;
+  let rightPreCalibCtrl = null;
   if (!calibr.valid) {
-    const leftPreCalibCtrl = getControllerLocalPos(dev.leftKneeCtrl);
-    const rightPreCalibCtrl = getControllerLocalPos(dev.rightKneeCtrl);
+    leftPreCalibCtrl = getControllerLocalPos(dev.leftKneeCtrl);
+    rightPreCalibCtrl = getControllerLocalPos(dev.rightKneeCtrl);
     if (updateFloorFromControllerLow(leftPreCalibCtrl, rightPreCalibCtrl)) {
       // World moved; sample once more in the new local frame.
       updateFloorFromControllerLow(getControllerLocalPos(dev.leftKneeCtrl), getControllerLocalPos(dev.rightKneeCtrl));
@@ -1234,7 +1249,8 @@ function applyTrackingToLocalAvatar() {
 
   if (!calibr.valid) {
     coreGroundConstraint.active = false;
-    placeAvatarInFrontForCalibration(head, calibrationFacingXZ);
+    const previewDistance = getCalibrationPreviewDistance(head, leftPreCalibCtrl, rightPreCalibCtrl);
+    placeAvatarInFrontForCalibration(head, calibrationFacingXZ, previewDistance);
     if (DEBUG_VIS) {
       debugHud.textContent =
 `mode=pre-calibration
@@ -1242,6 +1258,7 @@ lockedL=${sourceLabel(xrState.lockedLeftKneeSource)}
 lockedR=${sourceLabel(xrState.lockedRightKneeSource)}
 liveL=${sourceLabel(dev.leftKneeCtrl)}
 liveR=${sourceLabel(dev.rightKneeCtrl)}
+previewDist=${previewDistance.toFixed(2)}
 waist=(${coreTarget.x.toFixed(2)}, ${coreTarget.y.toFixed(2)}, ${coreTarget.z.toFixed(2)})
 neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.toFixed(2)})`;
       updateArrow(debugArrows.waistToHmd, coreTarget, head);
@@ -2087,6 +2104,7 @@ resetBtn.addEventListener('click', () => {
   xrState.lockedRightKneeSource = null;
   xrState.lockedLeftKneeNode = null;
   xrState.lockedRightKneeNode = null;
+  controllerFloorCalib.minY = Infinity;
   localStorage.removeItem(CALIB_STORAGE_KEY);
   statusEl.textContent = 'Pose reset. Calibration cleared.';
 });
