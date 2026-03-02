@@ -1492,7 +1492,9 @@ function solveLockedFootFromToe(side, toeAnchor, controllerQuat = null) {
   return { ankle, toe: toeAnchor.clone(), heel, footRot };
 }
 
-function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = null) {
+function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = null, opts = {}) {
+  const outwardPole = opts.outwardPole || null;
+  const outwardBias = clamp(opts.outwardBias ?? 0, 0, 1);
   const thigh = avatarLocal.edgeLenByJoints(`${side}Hip`, `${side}Knee`);
   const shin = avatarLocal.edgeLenByJoints(`${side}Knee`, `${side}Ankle`);
   const h = hipTarget.clone();
@@ -1511,9 +1513,28 @@ function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = nul
   if (pole.lengthSq() < 1e-8) {
     pole.set(side === 'Left' ? -1 : 1, 0, 0);
   }
+  if (outwardPole && outwardBias > 0) {
+    let outward = outwardPole.clone();
+    outward.addScaledVector(dir, -outward.dot(dir));
+    if (outward.lengthSq() > 1e-8) {
+      outward.normalize();
+      pole.lerp(outward, outwardBias);
+    }
+  }
   pole.normalize();
 
-  const knee = mid.clone().addScaledVector(pole, hOff);
+  let knee = mid.clone().addScaledVector(pole, hOff);
+  if (outwardPole) {
+    let outward = outwardPole.clone();
+    outward.addScaledVector(dir, -outward.dot(dir));
+    if (outward.lengthSq() > 1e-8) {
+      outward.normalize();
+      const midToKnee = knee.clone().sub(mid);
+      if (midToKnee.dot(outward) < 0) {
+        knee = mid.clone().addScaledVector(outward, hOff);
+      }
+    }
+  }
   if (side === 'Left') knee.x = Math.min(knee.x, h.x - 0.005);
   else knee.x = Math.max(knee.x, h.x + 0.005);
   return knee;
@@ -1556,7 +1577,12 @@ function solveGroundedLegFromCore(side, coreTarget, ankleTarget, controllerPos =
     }
   }
 
-  const kneeTarget = solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos);
+  let outwardPole = hipTarget.clone().sub(coreTarget);
+  if (outwardPole.lengthSq() < 1e-8) outwardPole.set(side === 'Left' ? -1 : 1, 0, 0);
+  const kneeTarget = solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos, {
+    outwardPole,
+    outwardBias: 0.75
+  });
   return { hipTarget, kneeTarget };
 }
 
