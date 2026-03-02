@@ -1779,6 +1779,9 @@ const MAX_SUBSTEP_TRAVEL = 0.03;
 const MAX_SOLVER_SUBSTEPS = 5;
 const IMPACT_COOLDOWN_MS = 70;
 let lastImpactAt = 0;
+const IMPACT_REARM_SEP = MIN_SEP + 0.02;
+const IMPACT_MIN_CLOSING_SPEED = 0.9;
+const activeImpactContacts = new Set();
 const LEG_RELEASE_Y = 0.07;
 const FLOOR_CONTACT_EPS = 0.001;
 const LOCK_FOOT_CONTACT_Y = 0.015;
@@ -1892,14 +1895,15 @@ function spawnImpact(point, intensity) {
   playImpactSound(intensity);
 }
 
-function estimateRelVelocity(chA, chB, jointA, jointB, dt) {
-  const a = chA.joints[jointA];
-  const ap = chA.prevJoints[jointA];
-  const b = chB.joints[jointB];
-  const bp = chB.prevJoints[jointB];
-  const va = [(a[0] - ap[0]) / dt, (a[1] - ap[1]) / dt, (a[2] - ap[2]) / dt];
-  const vb = [(b[0] - bp[0]) / dt, (b[1] - bp[1]) / dt, (b[2] - bp[2]) / dt];
-  return vlen(vsub(va, vb));
+function sampleSegmentVelocity(ch, a, b, t, dt) {
+  const invDt = 1 / Math.max(dt, 1e-4);
+  const pa = ch.joints[a];
+  const pb = ch.joints[b];
+  const ppa = ch.prevJoints[a];
+  const ppb = ch.prevJoints[b];
+  const va = [(pa[0] - ppa[0]) * invDt, (pa[1] - ppa[1]) * invDt, (pa[2] - ppa[2]) * invDt];
+  const vb = [(pb[0] - ppb[0]) * invDt, (pb[1] - ppb[1]) * invDt, (pb[2] - ppb[2]) * invDt];
+  return vlerp(va, vb, clamp(t, 0, 1));
 }
 
 function solveCollisions(dt) {
@@ -1921,21 +1925,34 @@ function solveCollisions(dt) {
       const p2 = s2.ch.joints[s2.a];
       const q2 = s2.ch.joints[s2.b];
       const c = segSegClosest(p1, q1, p2, q2);
-      if (!isFinite(c.dist) || c.dist >= MIN_SEP) continue;
-      const now = performance.now();
-      const vRel = estimateRelVelocity(s1.ch, s2.ch, s1.a, s2.a, dt);
-      const intensity = clamp((vRel - 0.8) / 3.5, 0, 1);
-      if (intensity > 0.12 && now - lastImpactAt > IMPACT_COOLDOWN_MS) {
-        const point = new THREE.Vector3((c.c1[0] + c.c2[0]) * 0.5, (c.c1[1] + c.c2[1]) * 0.5, (c.c1[2] + c.c2[2]) * 0.5);
-        spawnImpact(point, intensity);
-        lastImpactAt = now;
+      const pairKey = `${i}|${j}`;
+      if (!isFinite(c.dist)) {
+        activeImpactContacts.delete(pairKey);
+        continue;
       }
+      if (c.dist >= IMPACT_REARM_SEP) activeImpactContacts.delete(pairKey);
+      if (c.dist >= MIN_SEP) continue;
+      const now = performance.now();
       let nx = c.diff[0], ny = c.diff[1], nz = c.diff[2];
       let nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
       if (nLen < 1e-8) {
         nx = 0; ny = 1; nz = 0; nLen = 1;
       }
       nx /= nLen; ny /= nLen; nz /= nLen;
+
+      const v1 = sampleSegmentVelocity(s1.ch, s1.a, s1.b, c.s, dt);
+      const v2 = sampleSegmentVelocity(s2.ch, s2.a, s2.b, c.t, dt);
+      const relV = vsub(v1, v2);
+      const closingSpeed = Math.max(0, -(relV[0] * nx + relV[1] * ny + relV[2] * nz));
+      const intensity = clamp((closingSpeed - IMPACT_MIN_CLOSING_SPEED) / 3.0, 0, 1);
+      const isNewContact = !activeImpactContacts.has(pairKey);
+      if (isNewContact && intensity > 0.12 && now - lastImpactAt > IMPACT_COOLDOWN_MS) {
+        const point = new THREE.Vector3((c.c1[0] + c.c2[0]) * 0.5, (c.c1[1] + c.c2[1]) * 0.5, (c.c1[2] + c.c2[2]) * 0.5);
+        spawnImpact(point, intensity);
+        lastImpactAt = now;
+      }
+      activeImpactContacts.add(pairKey);
+
       const push = (MIN_SEP - c.dist) * COLL_STIFF;
       const cx = nx * push;
       const cy = ny * push;
