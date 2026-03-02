@@ -1893,7 +1893,6 @@ function solveDistance(ch, stiffness = DIST_STIFF) {
 }
 
 function stabilizeLocalNeckSpring() {
-  if (FLOPPY_HEAD_MODE) return;
   const core = avatarLocal.joints.Core;
   const neck = avatarLocal.joints.Neck;
   if (!core || !neck) return;
