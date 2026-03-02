@@ -1560,7 +1560,8 @@ function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = nul
   let pole = (controllerPos ? controllerPos.clone() : prevKnee).sub(mid);
   pole.addScaledVector(dir, -pole.dot(dir));
   if (pole.lengthSq() < 1e-8) {
-    pole.set(side === 'Left' ? -1 : 1, 0, 0);
+    if (outwardPole && outwardPole.lengthSq() > 1e-8) pole.copy(outwardPole);
+    else pole.set(side === 'Left' ? -1 : 1, 0, 0);
   }
   if (outwardPole && outwardBias > 0) {
     let outward = outwardPole.clone();
@@ -1584,8 +1585,6 @@ function solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos = nul
       }
     }
   }
-  if (side === 'Left') knee.x = Math.min(knee.x, h.x - 0.005);
-  else knee.x = Math.max(knee.x, h.x + 0.005);
   return knee;
 }
 
@@ -1626,11 +1625,14 @@ function solveGroundedLegFromCore(side, coreTarget, ankleTarget, controllerPos =
     }
   }
 
-  let outwardPole = hipTarget.clone().sub(coreTarget);
+  let pelvisRight = getJointVec('RightHip').sub(getJointVec('LeftHip'));
+  if (pelvisRight.lengthSq() < 1e-8) pelvisRight.set(1, 0, 0);
+  let outwardPole = side === 'Left' ? pelvisRight.multiplyScalar(-1) : pelvisRight;
+  if (outwardPole.lengthSq() < 1e-8) outwardPole = hipTarget.clone().sub(coreTarget);
   if (outwardPole.lengthSq() < 1e-8) outwardPole.set(side === 'Left' ? -1 : 1, 0, 0);
   const kneeTarget = solveKneeFromHipAnkle(side, hipTarget, ankleTarget, controllerPos, {
     outwardPole,
-    outwardBias: 0.75
+    outwardBias: 1.0
   });
   return { hipTarget, kneeTarget };
 }
