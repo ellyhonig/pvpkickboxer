@@ -65,6 +65,7 @@ const calibrateBtn = document.getElementById('calibrateBtn');
 const resetBtn = document.getElementById('resetBtn');
 const canvas = document.getElementById('c');
 const DEBUG_VIS = true;
+const DEBUG_ARROWS = false;
 const CALIB_STORAGE_KEY = 'pvpkickboxer_calib_v2';
 const GAZE_CALIB_DWELL_MS = 1000;
 const GAZE_CALIB_COOLDOWN_MS = 800;
@@ -246,7 +247,7 @@ const debugArrows = {
   rightHipDir: new THREE.ArrowHelper(new THREE.Vector3(0, -1, 0), new THREE.Vector3(), 0.01, 0x6666ff),
   rightKneeDir: new THREE.ArrowHelper(new THREE.Vector3(0, -1, 0), new THREE.Vector3(), 0.01, 0x66aaff)
 };
-if (DEBUG_VIS) {
+if (DEBUG_VIS && DEBUG_ARROWS) {
   world.add(debugArrows.waistToHmd);
   world.add(debugArrows.leftHipDir);
   world.add(debugArrows.leftKneeDir);
@@ -273,7 +274,7 @@ function sourceLabel(nodeOrSource) {
 }
 
 function updateArrow(helper, origin, target) {
-  if (!DEBUG_VIS || !origin || !target) {
+  if (!DEBUG_VIS || !DEBUG_ARROWS || !origin || !target) {
     helper.visible = false;
     return;
   }
