@@ -1052,12 +1052,14 @@ function clampFreeShinHyperextension(side, kneeRot) {
   const axisNow = axisRef.clone().normalize().applyQuaternion(qAlign).normalize();
   const extDir = thigh.clone().multiplyScalar(-1);
   const shinDir = new THREE.Vector3(0, 1, 0).applyQuaternion(kneeRot).normalize();
+  const up = new THREE.Vector3(0, 1, 0);
 
   // Signed hinge bend where 0 = straight; negative = hyperextension.
   const bend = signedAngleAroundAxis(extDir, shinDir, axisNow);
   const maxBend = THREE.MathUtils.degToRad(180 - KNEE_MIN_INTERIOR_DEG);
   const state = kneeHingeState[side];
-  const valid = bend >= 0 && bend <= maxBend;
+  const clampedBend = clamp(bend, 0, maxBend);
+  const valid = Math.abs(clampedBend - bend) < 1e-6;
   if (valid) {
     state.lastValidBend = bend;
     state.lastValidRot.copy(kneeRot);
@@ -1066,9 +1068,21 @@ function clampFreeShinHyperextension(side, kneeRot) {
     return kneeRot;
   }
 
+  // Continuous boundary clamp: keep controller responsiveness but never allow
+  // crossing past extension/flexion limits.
+  const clampedShin = extDir.clone().applyAxisAngle(axisNow, clampedBend).normalize();
+  const corr = new THREE.Quaternion().setFromUnitVectors(shinDir, clampedShin);
+  const clampedRot = corr.multiply(kneeRot.clone()).normalize();
+
+  state.lastValidBend = clampedBend;
+  state.lastValidRot.copy(clampedRot);
+  state.hasValidRot = true;
   state.frozen = true;
-  if (state.hasValidRot) return state.lastValidRot.clone();
-  return kneeRot;
+  if (up.clone().applyQuaternion(clampedRot).dot(clampedShin) < 0.999) {
+    // Fallback if numerical drift occurs.
+    return new THREE.Quaternion().setFromUnitVectors(up, clampedShin);
+  }
+  return clampedRot;
 }
 
 function calibrateNow() {
