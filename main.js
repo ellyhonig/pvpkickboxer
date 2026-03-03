@@ -1826,6 +1826,7 @@ const MIN_SEP = 0.085;
 const EXACT_BONE_PASSES = 6;
 const NECK_SPRING = 0.16;
 const NECK_MAX_XZ = 0.1;
+const HEAD_MAX_SPINE_ANGLE_DEG = 44.0;
 const MAX_LOCAL_JOINT_SPEED = 2.1;
 const MAX_REMOTE_JOINT_SPEED = 2.1;
 const MAX_SUBSTEP_TRAVEL = 0.03;
@@ -1957,6 +1958,33 @@ function sampleSegmentVelocity(ch, a, b, t, dt) {
   const va = [(pa[0] - ppa[0]) * invDt, (pa[1] - ppa[1]) * invDt, (pa[2] - ppa[2]) * invDt];
   const vb = [(pb[0] - ppb[0]) * invDt, (pb[1] - ppb[1]) * invDt, (pb[2] - ppb[2]) * invDt];
   return vlerp(va, vb, clamp(t, 0, 1));
+}
+
+function clampLocalHeadAngleToSpine(maxAngleDeg = HEAD_MAX_SPINE_ANGLE_DEG) {
+  const core = avatarLocal.joints.Core;
+  const neck = avatarLocal.joints.Neck;
+  const head = avatarLocal.joints.Head;
+  if (!core || !neck || !head) return;
+
+  const spine = new THREE.Vector3(neck[0] - core[0], neck[1] - core[1], neck[2] - core[2]);
+  const neckToHead = new THREE.Vector3(head[0] - neck[0], head[1] - neck[1], head[2] - neck[2]);
+  const spineLen = spine.length();
+  const headLen = neckToHead.length();
+  if (spineLen < 1e-6 || headLen < 1e-6) return;
+
+  const spineDir = spine.multiplyScalar(1 / spineLen);
+  const headDir = neckToHead.multiplyScalar(1 / headLen);
+  const maxRad = THREE.MathUtils.degToRad(maxAngleDeg);
+  const dot = clamp(spineDir.dot(headDir), -1, 1);
+  const angle = Math.acos(dot);
+  if (angle <= maxRad) return;
+
+  const t = maxRad / angle;
+  const clampedDir = spineDir.clone().lerp(headDir, t).normalize();
+  const clampedHead = new THREE.Vector3(neck[0], neck[1], neck[2]).addScaledVector(clampedDir, headLen);
+  head[0] = clampedHead.x;
+  head[1] = clampedHead.y;
+  head[2] = clampedHead.z;
 }
 
 function solveCollisions(dt) {
@@ -2310,6 +2338,7 @@ function step(dt) {
     solveDistance(avatarLocal, 1);
     solveDistance(avatarRemote, 1);
   }
+  clampLocalHeadAngleToSpine();
   enforceRigidFeetFromAnkles();
   avatarLocal.applyMeshes();
   avatarRemote.applyMeshes();
