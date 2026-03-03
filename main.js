@@ -1374,15 +1374,11 @@ neck =(${neckTarget.x.toFixed(2)}, ${neckTarget.y.toFixed(2)}, ${neckTarget.z.to
       setPinned('RightKnee', rightKneeTarget, HIP_KNEE_PIN_SMOOTH);
   }
 
-  if (qL && !legPlant.Left.locked) {
-    const delta = qL.clone().multiply(calibr.leftKneeRotRef.clone().invert()).normalize();
-    const rawRot = delta.multiply(calibr.leftAnkleDirRef.clone());
-    avatarLocal.rot.LeftKnee.copy(clampFreeShinHyperextension('Left', rawRot));
+  if (qL && !legPlant.Left.locked && leftHipTarget && leftKneeTarget) {
+    avatarLocal.rot.LeftKnee.copy(solveFreeLegHingeOnlyKneeRot('Left', leftHipTarget, leftKneeTarget, qL));
   }
-  if (qR && !legPlant.Right.locked) {
-    const delta = qR.clone().multiply(calibr.rightKneeRotRef.clone().invert()).normalize();
-    const rawRot = delta.multiply(calibr.rightAnkleDirRef.clone());
-    avatarLocal.rot.RightKnee.copy(clampFreeShinHyperextension('Right', rawRot));
+  if (qR && !legPlant.Right.locked && rightHipTarget && rightKneeTarget) {
+    avatarLocal.rot.RightKnee.copy(solveFreeLegHingeOnlyKneeRot('Right', rightHipTarget, rightKneeTarget, qR));
   }
   if (DEBUG_VIS) {
     const lCtrl = leftKneeCtrlPos ? leftKneeCtrlPos.clone().add(calibr.leftKneeOffset) : null;
@@ -1643,19 +1639,67 @@ function solveFreeLegRigidStickFromCore(side, coreTarget, controllerPos = null) 
   const coreToHipLen = avatarLocal.edgeLenByJoints('Core', `${side}Hip`);
   const hipToKneeLen = avatarLocal.edgeLenByJoints(`${side}Hip`, `${side}Knee`);
 
-  let desiredDir = (controllerPos ? controllerPos.clone() : getJointVec(`${side}Knee`)).sub(coreTarget);
-  if (desiredDir.lengthSq() < 1e-8) desiredDir.copy(getJointVec(`${side}Hip`).sub(coreTarget));
-  if (desiredDir.lengthSq() < 1e-8) desiredDir.set(side === 'Left' ? -1 : 1, -0.2, 0);
-  desiredDir.normalize();
+  // Drive hip rotation from controller position (turn-over comes from hip, not knee).
+  let desiredHipDir = (controllerPos ? controllerPos.clone() : getJointVec(`${side}Hip`)).sub(coreTarget);
+  if (desiredHipDir.lengthSq() < 1e-8) desiredHipDir.copy(getJointVec(`${side}Hip`).sub(coreTarget));
+  if (desiredHipDir.lengthSq() < 1e-8) desiredHipDir.set(side === 'Left' ? -1 : 1, -0.2, 0);
+  desiredHipDir.normalize();
 
-  let currentDir = getJointVec(`${side}Knee`).sub(coreTarget);
-  if (currentDir.lengthSq() < 1e-8) currentDir = desiredDir.clone();
-  else currentDir.normalize();
+  let currentHipDir = getJointVec(`${side}Hip`).sub(coreTarget);
+  if (currentHipDir.lengthSq() < 1e-8) currentHipDir = desiredHipDir.clone();
+  else currentHipDir.normalize();
 
-  const solvedDir = currentDir.lerp(desiredDir, FREE_LEG_DIR_BLEND).normalize();
-  const hipTarget = coreTarget.clone().addScaledVector(solvedDir, coreToHipLen);
-  const kneeTarget = coreTarget.clone().addScaledVector(solvedDir, coreToHipLen + hipToKneeLen);
+  const solvedHipDir = currentHipDir.lerp(desiredHipDir, FREE_LEG_DIR_BLEND).normalize();
+  const hipTarget = coreTarget.clone().addScaledVector(solvedHipDir, coreToHipLen);
+
+  let thighDir = (controllerPos ? controllerPos.clone() : getJointVec(`${side}Knee`)).sub(hipTarget);
+  if (thighDir.lengthSq() < 1e-8) thighDir.copy(getJointVec(`${side}Knee`).sub(hipTarget));
+  if (thighDir.lengthSq() < 1e-8) {
+    const thighRef = side === 'Left' ? calibr.leftThighRef : calibr.rightThighRef;
+    if (thighRef.lengthSq() > 1e-8) thighDir.copy(thighRef).multiplyScalar(-1);
+  }
+  if (thighDir.lengthSq() < 1e-8) thighDir.copy(solvedHipDir);
+  thighDir.normalize();
+
+  const kneeTarget = hipTarget.clone().addScaledVector(thighDir, hipToKneeLen);
   return { hipTarget, kneeTarget };
+}
+
+function solveFreeLegHingeOnlyKneeRot(side, hipTarget, kneeTarget, controllerQuat) {
+  const ref = side === 'Left' ? calibr.leftKneeRotRef : calibr.rightKneeRotRef;
+  const ankleRef = side === 'Left' ? calibr.leftAnkleDirRef : calibr.rightAnkleDirRef;
+  const thighRef = side === 'Left' ? calibr.leftThighRef : calibr.rightThighRef;
+  const axisRef = side === 'Left' ? calibr.leftKneeAxisRef : calibr.rightKneeAxisRef;
+  const up = new THREE.Vector3(0, 1, 0);
+  const maxBend = THREE.MathUtils.degToRad(180 - KNEE_MIN_INTERIOR_DEG);
+
+  const delta = controllerQuat.clone().multiply(ref.clone().invert()).normalize();
+  const rawRot = delta.multiply(ankleRef.clone());
+
+  const thighNow = hipTarget.clone().sub(kneeTarget);
+  if (thighNow.lengthSq() < 1e-8 || thighRef.lengthSq() < 1e-8 || axisRef.lengthSq() < 1e-8) {
+    return clampFreeShinHyperextension(side, rawRot);
+  }
+  thighNow.normalize();
+  const qAlign = new THREE.Quaternion().setFromUnitVectors(thighRef.clone().normalize(), thighNow);
+  let axisNow = axisRef.clone().normalize().applyQuaternion(qAlign).normalize();
+  const extDir = thighNow.clone().multiplyScalar(-1);
+
+  let shinRaw = up.clone().applyQuaternion(rawRot).normalize();
+  shinRaw.addScaledVector(axisNow, -shinRaw.dot(axisNow));
+  if (shinRaw.lengthSq() < 1e-8) shinRaw = extDir.clone();
+  else shinRaw.normalize();
+
+  let bend = signedAngleAroundAxis(extDir, shinRaw, axisNow);
+  if (bend < 0) {
+    axisNow.multiplyScalar(-1);
+    bend = signedAngleAroundAxis(extDir, shinRaw, axisNow);
+  }
+  bend = clamp(bend, 0, maxBend);
+
+  const shinHinge = extDir.clone().applyAxisAngle(axisNow, bend).normalize();
+  const hingeRot = new THREE.Quaternion().setFromUnitVectors(up, shinHinge);
+  return clampFreeShinHyperextension(side, hingeRot);
 }
 
 function snapLocalAvatarFeetToGround() {
