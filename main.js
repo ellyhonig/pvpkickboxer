@@ -2154,10 +2154,7 @@ let netAccum = 0;
 function driveRemoteAvatarFromState() {
   const online = remoteState && (performance.now() - remoteLastSeen < 1200);
   if (!online) {
-    networkEl.textContent = calibr.valid
-      ? `Network: no remote player, showing static opponent (room: ${room})`
-      : `Network: no remote player, mirrored pre-calibration placement (room: ${room})`;
-    if (calibr.valid && remoteStartPose) avatarRemote.restore(remoteStartPose);
+    networkEl.textContent = `Network: no remote player, holding current opponent position (room: ${room})`;
     return;
   }
   networkEl.textContent = `Network: remote connected (room: ${room})`;
