@@ -330,17 +330,25 @@ function getCalibrationPreviewDistance(head, leftCtrlPos = null, rightCtrlPos = 
   return clamp(avg, CALIB_PREVIEW_DISTANCE_MIN, CALIB_PREVIEW_DISTANCE_MAX);
 }
 
-function placeAvatarInFrontForCalibration(head, forwardXZ, previewDistance = CALIB_PREVIEW_DISTANCE) {
-  const coreNow = getJointVec('Core');
-  const desiredCore = head.clone().add(forwardXZ.clone().multiplyScalar(previewDistance));
-  desiredCore.y = coreNow.y;
+function applyRigidTransformToAvatar(ch, pivot, rot, translation) {
+  for (const j of JOINTS) {
+    const p = new THREE.Vector3().fromArray(ch.joints[j]);
+    p.sub(pivot).applyQuaternion(rot).add(pivot).add(translation);
+    ch.joints[j] = [p.x, p.y, p.z];
+  }
+}
+
+function placeAvatarsInFrontForCalibration(head, forwardXZ, previewDistance = CALIB_PREVIEW_DISTANCE) {
+  const localCoreNow = getJointVec('Core');
+  const desiredLocalCore = head.clone().add(forwardXZ.clone().multiplyScalar(previewDistance));
+  desiredLocalCore.y = localCoreNow.y;
 
   const currentForward = getAvatarForwardXZ(avatarLocal);
-  const q = new THREE.Quaternion().setFromUnitVectors(currentForward, forwardXZ);
-  for (const j of JOINTS) {
-    const p = getJointVec(j).sub(coreNow).applyQuaternion(q).add(desiredCore);
-    avatarLocal.joints[j] = [p.x, p.y, p.z];
-  }
+  const rot = new THREE.Quaternion().setFromUnitVectors(currentForward, forwardXZ);
+  const translation = desiredLocalCore.clone().sub(localCoreNow);
+
+  applyRigidTransformToAvatar(avatarLocal, localCoreNow, rot, translation);
+  applyRigidTransformToAvatar(avatarRemote, localCoreNow, rot, translation);
 }
 
 function resetCalibratorBasePosFromOpponentHead() {
@@ -1266,7 +1274,7 @@ function applyTrackingToLocalAvatar() {
   if (!calibr.valid) {
     coreGroundConstraint.active = false;
     const previewDistance = getCalibrationPreviewDistance(head, leftPreCalibCtrl, rightPreCalibCtrl);
-    placeAvatarInFrontForCalibration(head, calibrationFacingXZ, previewDistance);
+    placeAvatarsInFrontForCalibration(head, calibrationFacingXZ, previewDistance);
     if (DEBUG_VIS) {
       debugHud.textContent =
 `mode=pre-calibration
@@ -2137,8 +2145,10 @@ let netAccum = 0;
 function driveRemoteAvatarFromState() {
   const online = remoteState && (performance.now() - remoteLastSeen < 1200);
   if (!online) {
-    networkEl.textContent = `Network: no remote player, showing static opponent (room: ${room})`;
-    if (remoteStartPose) avatarRemote.restore(remoteStartPose);
+    networkEl.textContent = calibr.valid
+      ? `Network: no remote player, showing static opponent (room: ${room})`
+      : `Network: no remote player, mirrored pre-calibration placement (room: ${room})`;
+    if (calibr.valid && remoteStartPose) avatarRemote.restore(remoteStartPose);
     return;
   }
   networkEl.textContent = `Network: remote connected (room: ${room})`;
