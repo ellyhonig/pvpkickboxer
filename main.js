@@ -349,6 +349,15 @@ function placeAvatarsInFrontForCalibration(head, forwardXZ, previewDistance = CA
 
   applyRigidTransformToAvatar(avatarLocal, localCoreNow, rot, translation);
   applyRigidTransformToAvatar(avatarRemote, localCoreNow, rot, translation);
+
+  // Keep the gaze calibration marker anchored to the opponent frame during pre-calib placement.
+  if (gazeCalib.hasBasePos) {
+    gazeCalib.basePos
+      .sub(localCoreNow)
+      .applyQuaternion(rot)
+      .add(localCoreNow)
+      .add(translation);
+  }
 }
 
 function resetCalibratorBasePosFromOpponentHead() {
