@@ -531,6 +531,7 @@ world.add(avatarRemote.group);
 
 let startPose = null;
 let remoteStartPose = null;
+let offlineRemoteHoldPose = null;
 
 const calibr = {
   valid: false,
@@ -1140,6 +1141,7 @@ function calibrateNow() {
   captureAnkleDirectionReference();
   captureRigidFootReference();
   captureKneeHyperextensionReferences();
+  offlineRemoteHoldPose = avatarRemote.snapshot();
   saveCalibration();
   statusEl.textContent = 'Calibrated: waist offset + knee controllers locked.';
 }
@@ -1147,6 +1149,7 @@ function calibrateNow() {
 function clearCalibrationOnly() {
   if (startPose) avatarLocal.restore(startPose);
   if (remoteStartPose) avatarRemote.restore(remoteStartPose);
+  offlineRemoteHoldPose = null;
   resetCalibratorBasePosFromOpponentHead();
   clearCalibrationPoseHold();
   resetKneeHingeState();
@@ -2154,9 +2157,17 @@ let netAccum = 0;
 function driveRemoteAvatarFromState() {
   const online = remoteState && (performance.now() - remoteLastSeen < 1200);
   if (!online) {
-    networkEl.textContent = `Network: no remote player, holding current opponent position (room: ${room})`;
+    if (calibr.valid) {
+      if (!offlineRemoteHoldPose) offlineRemoteHoldPose = avatarRemote.snapshot();
+      avatarRemote.restore(offlineRemoteHoldPose);
+      networkEl.textContent = `Network: no remote player, holding calibrated opponent pose (room: ${room})`;
+      return;
+    }
+    offlineRemoteHoldPose = null;
+    networkEl.textContent = `Network: no remote player, mirrored pre-calibration placement (room: ${room})`;
     return;
   }
+  offlineRemoteHoldPose = null;
   networkEl.textContent = `Network: remote connected (room: ${room})`;
   for (const key of Object.keys(remoteState.joints)) {
     const t = remoteState.joints[key];
@@ -2175,6 +2186,7 @@ function poseCentering() {
 resetBtn.addEventListener('click', () => {
   if (startPose) avatarLocal.restore(startPose);
   if (remoteStartPose) avatarRemote.restore(remoteStartPose);
+  offlineRemoteHoldPose = null;
   resetCalibratorBasePosFromOpponentHead();
   clearCalibrationPoseHold();
   resetKneeHingeState();
